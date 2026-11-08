@@ -212,33 +212,34 @@ used by tests and available to hosts.
 
 ## Host application
 
-`app/app.cpp` is a libdesktop application. `app_init()` binds a
-`pf::frame_reactor`, installs the runtime menu tree and boots the machine;
-libdesktop owns the native window and message loop. A dedicated
-`pf::serial_executor` emulates one PAL frame at a time and publishes a
-triple-buffered snapshot. The UI loop only pumps
-`pf::platform_events()`/UI tasks and presents the newest snapshot through
-`pf::window_frame::present_pixels()`. Repaints use the same surface through
-`pf::draw_context::draw_bitmap()`, so a paused or uncovered window is never
-replaced by a stale direct blit.
+`app/app.cpp` is a `ui::app` linked to libdesktop's `core`, `platform`, `render`
+and `ui` libraries. Its application frame contains `ui::make_menu_bar` and a
+texture-backed `ui::element`; the host implements `ui::frame_host` layout,
+painting, drop handling and splitter input. libdesktop owns the native window
+and message loop. A dedicated `platform::serial_executor` emulates one PAL
+frame at a time and publishes a triple-buffered snapshot. The UI loop pumps
+`platform::pump_events()` and presents the newest snapshot by composing a
+`core::surface`, uploading a `render::texture`, and drawing it through
+`render::draw_context`, so a paused or uncovered window is never replaced by a
+stale direct blit.
 
-The app's `pf::audio_stream` is the worker's real-time clock when a device is
-available: the worker does not execute another PAL frame until the stream
+The app's `platform::audio_stream` is the worker's real-time clock when a device
+is available: the worker does not execute another PAL frame until the stream
 accepts the current PCM block. If the device cannot start, or a stream refuses
 a block after the capacity check, the worker diagnoses the rejection and
 switches to the fixed 50 Hz wall-clock fallback. The stream's bounded block
 queue is deliberately checked before `generate_audio()`, so a full ring cannot
 advance the SID clock and discard that frame. The offscreen `-test` path uses a
-fake public `pf::audio_stream` to pin both refusal paths without opening an
+small fake `platform::audio_stream` to pin both refusal paths without opening an
 audio device.
 
 The host mutex only serializes machine control operations against the worker;
-painting never takes it and never touches the machine. There is no private OS
-window wrapper. Key presses and releases arrive through
-`frame_reactor::handle_keyboard()` and still use
-`machine::queue_key`, so a tap shorter than a frame lasts for one emulated
-frame. RESTORE remains the separate NMI pulse, joystick taps are latched until
-the next frame, and focus loss releases both matrix and joystick state.
+painting never takes it and never touches the machine. Key presses enter the
+C64 matrix through `ui::app::key_down` and `machine::queue_key`; held-key
+releases are synchronized with the platform key state, so a tap shorter than a
+frame lasts for one emulated frame. RESTORE remains the separate NMI pulse,
+joystick taps are latched until the next frame, and focus loss releases both
+matrix and joystick state.
 
 Key presses and releases reach the machine through `machine::queue_key`, and
 each `exec()` applies the queued changes at most one per key, so every press
@@ -248,18 +249,17 @@ two bursts — every key the On-Screen Keyboard or a macro tool types. Joystick
 presses are latched the same way until the next frame reads them. While paused,
 nothing runs a frame, so keys go straight to the matrix.
 
-The client area is composed into an app-owned `pf::bitmap`: nearest-neighbour
+The client area is composed into an app-owned RGB surface: nearest-neighbour
 integer scaling for the picture, and a debug panel drawn with the C64's own
 character ROM. Presentation and painting go through libdesktop; the app names
 no GDI object, HWND or audio device. Window geometry and the debug panel's
-width and visibility persist through an explicit shared INI store at the old
-roaming `%APPDATA%\\lib8bit\\lib8bit.ini` location, with the original sections
-and keys.
+width and visibility persist through an explicit INI store at
+`%APPDATA%\lib8bit\lib8bit.ini`.
 
 ## Rules that keep this working
 
-1. `src/` stays platform independent. No `windows.h`, no file access, no `pf::`
-   types, no `wchar_t` in new API.
+1. `src/` stays platform independent: no `windows.h`, no file access, no
+   libdesktop types and no `wchar_t` in new API.
 2. `ram_read`/`ram_write` are the only path to memory. Anything that bypasses
    them bypasses banking and I/O.
 3. Chips are advanced only from `step_hardware`, and only by cycles actually

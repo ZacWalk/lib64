@@ -109,7 +109,6 @@ audio stream. Crash and data-loss paths are closed. Remaining:
 
 | | |
 |---|---|
-| `MAX_PATH` buffer in libdesktop's Open dialog | Paths over 259 characters fail silently until the shared dialog grows a dynamically sized buffer. Drag-and-drop uses the platform's decoded path and handles them. |
 | A refused audio block ends the device-clock path | The app diagnoses a `write()` refusal after `can_write()` and switches to fixed 50 Hz pacing; the shared stream remains responsible for device lifetime. |
 
 ## API

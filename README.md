@@ -40,7 +40,7 @@ clocks.
 | Path | Contents |
 |------|----------|
 | `src/` | The emulator. Platform independent — no Windows headers, no file system. Builds the `lib8bit` static library. |
-| `app/` | Windows host: libdesktop window/frame reactor, pixel presentation, audio stream, menus, drag-and-drop and C64 input mapping. |
+| `app/` | Windows host: a libdesktop `ui::app` with a drawn menu bar, texture-backed screen, audio stream, drag-and-drop and C64 input mapping. |
 | `test/` | Command-line behavioural test suite and its fixtures. |
 | `docs/` | [design.md](docs/design.md) (architecture) and [todo.md](docs/todo.md) (gaps). |
 
@@ -79,8 +79,8 @@ running machine alone. A disk image stays in the drive after its first program
 starts, so games that load more data as they run work. The title bar always
 states the current machine state:
 media, input mode, pause, and whether audio started. Window position and the
-debug panel's width and visibility are remembered in the original roaming
-`%APPDATA%\lib8bit\lib8bit.ini` file through libdesktop's shared INI store.
+debug panel's width and visibility are remembered in
+`%APPDATA%\lib8bit\lib8bit.ini` through libdesktop's shared INI store.
 
 | | |
 |---|---|
@@ -125,7 +125,7 @@ libdesktop.
 
 ## Tests
 
-`lib8bit_testsd` runs about 210 checks and returns non-zero on failure: every
+`lib8bit_testsd` returns non-zero on failure after exercising every
 documented CPU opcode with flags and cycle counts, pixel-exact VIC-II output for
 each graphics mode and for sprite collisions, CIA timer and interrupt behaviour,
 the assembler, a full KERNAL cold boot to the `READY.` prompt, keyboard input
@@ -138,10 +138,10 @@ at compile time, so nothing needs copying next to the executable).
 
 On Windows, CTest also runs `app8bit -test` with libdesktop's offscreen GUI
 mode. It checks integer-nearest layout and surface presentation, the
-`draw_context` repaint path, keyboard matrix taps, RESTORE/NMI, joystick
-tap/release handling, the background snapshot worker, minimum client size,
-capture-loss cleanup, end-session settings, splitter input and the bounded
-`pf::audio_stream` adapter without showing or focusing a window.
+`render::draw_context` texture repaint path, keyboard matrix taps, RESTORE/NMI,
+joystick tap/release handling, the background snapshot worker, minimum client
+size, capture-loss cleanup, end-session settings, splitter input and the
+bounded `platform::audio_stream` adapter without showing or focusing a window.
 
 It doubles as a small toolbox:
 

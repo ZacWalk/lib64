@@ -21,7 +21,7 @@ if(LIB8BIT_BUILD_APP)
     include(FetchContent)
     FetchContent_Declare(libdesktop
         GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-        GIT_TAG        31aae322af6e0696a9597726705b1121bd31580b
+        GIT_TAG        04109ee82a500db38d439fa281bbc3f43124adfe
     )
     FetchContent_MakeAvailable(libdesktop)
 endif()
@@ -65,13 +65,13 @@ target_include_directories(lib8bit PUBLIC src)
 lib8bit_warnings(lib8bit)
 
 if(LIB8BIT_BUILD_APP)
-    platform_add_app(app8bit
+    libdesktop_add_app(app8bit
         SOURCES     app/app.cpp
         ICON        app/res/c64.ico
         DESCRIPTION "lib8bit - Commodore 64 emulator"
         OUTPUT_NAME app8bit
     )
-    target_link_libraries(app8bit PRIVATE lib8bit::lib8bit)
+    target_link_libraries(app8bit PRIVATE lib8bit::lib8bit libdesktop::ui)
     lib8bit_warnings(app8bit)
     if(MSVC)
         target_compile_options(app8bit PRIVATE /EHsc)

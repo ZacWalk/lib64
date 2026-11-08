@@ -12,13 +12,14 @@ See [README.md](README.md) for what the emulator covers at a glance.
 ## Project Boundaries
 
 - `src/` is platform independent. No `windows.h`, no `wchar_t` in new API, no
-  file-system access, no `pf::` types. It must link into Diffractor and other
+  file-system access, no libdesktop types. It must link into Diffractor and other
   hosts unchanged.
 - The library takes bytes and returns bytes: parsers in `src/` operate on
   caller-provided buffers. Reading and writing files is the host's job.
 - `app/` owns media files, the host-key to C64-matrix mapping, presentation,
-  menus, settings and the audio clock through libdesktop-core. libdesktop
-  owns the window, message loop, drawing and audio devices; do not restore
+  menus, settings and the audio clock through libdesktop. The `ui::app` frame
+  owns the menu, texture presentation and input host while libdesktop owns the
+  window, message loop, rendering and audio devices; do not restore
   a private Win32 GUI or include Windows SDK headers in the host.
 - When the app needs a new capability, expose a platform-neutral operation from
   `machine.h` rather than reaching into `machine_state`.
