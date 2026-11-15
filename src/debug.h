@@ -1,6 +1,6 @@
 #pragma once
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // Machine introspection for monitors and debug overlays: a side-effect-free
 // snapshot of the CPU, banking, VIC-II, CIA and SID state plus a disassembly
@@ -20,9 +20,9 @@ constexpr int DEBUG_DISASM_LINES = 12;
 struct disasm_line
 {
 	uint16_t address = 0;
-	uint8_t length = 1;    // 1-3
+	uint8_t length = 1; // 1-3
 	uint8_t bytes[3] = {};
-	char text[20] = {};    // e.g. "LDA ($FB),Y"
+	char text[20] = {}; // e.g. "LDA ($FB),Y"
 };
 
 struct debug_state
@@ -39,13 +39,13 @@ struct debug_state
 	bool cart_inserted = false;
 
 	// --- VIC-II -------------------------------------------------------------
-	uint8_t ctrl1 = 0, ctrl2 = 0, mem_ptr = 0;  // $D011, $D016, $D018
-	uint8_t border = 0, background = 0;         // $D020, $D021
+	uint8_t ctrl1 = 0, ctrl2 = 0, mem_ptr = 0; // $D011, $D016, $D018
+	uint8_t border = 0, background = 0;        // $D020, $D021
 	uint16_t raster = 0, raster_compare = 0;
 	uint8_t vic_irq_enable = 0, vic_irq_status = 0;
 	uint8_t sprite_enable = 0, sprite_sprite_hit = 0, sprite_bg_hit = 0;
 	uint16_t vic_bank = 0, screen_base = 0, char_base = 0, bitmap_base = 0;
-	const char* mode = "";                      // graphics mode name
+	const char* mode = ""; // graphics mode name
 
 	// --- CIA1 / CIA2 --------------------------------------------------------
 	// Index 0 = CIA1 timer A, 1 = CIA1 B, 2 = CIA2 A, 3 = CIA2 B.

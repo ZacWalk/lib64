@@ -1,9 +1,9 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // 6502 opcode table data: maps each of the 256 byte values to its length,
 // mnemonic and addressing mode (see opcodes.h).
 
-//opcodes_table = {
+// opcodes_table = {
 // "unknown"
 // "implied"
 // "accumulator"
@@ -19,20 +19,20 @@
 // "($indirect),Y"
 // "relative"
 
-
 #include "opcodes.h"
 
 // byte (unused), instruction length, instruction name, addressing mode.
 // Lengths cover the undocumented opcodes too, so a disassembler and the CPU
 // core walk the instruction stream identically. 0 marks a JAM/KIL.
 
+// clang-format off
 const opcode opcodes[256] =
 {
 	"00", 2, "BRK", "implied", // BRK (the 6502 skips the byte after the opcode)
 	"01", 2, "ORA", "($indirect,X)", // ORA ($00,X)
-	"02", 0, "UNDEFINED", "unknown", // UNDEFINED 
-	"03", 2, "UNDEFINED", "unknown", // UNDEFINED  
-	"04", 2, "UNDEFINED", "unknown", // UNDEFINED 
+	"02", 0, "UNDEFINED", "unknown", // UNDEFINED
+	"03", 2, "UNDEFINED", "unknown", // UNDEFINED
+	"04", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"05", 2, "ORA", "$zero page", // ORA $00
 	"06", 2, "ASL", "$zero page", // ASL $00
 	"07", 2, "UNDEFINED", "unknown", // UNDEFINED
@@ -69,7 +69,7 @@ const opcode opcodes[256] =
 	"26", 2, "ROL", "$zero page", // ROL $00
 	"27", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"28", 1, "PLP", "implied", // PLP
-	"29", 2, "AND", "#immediate", // AND #$00 
+	"29", 2, "AND", "#immediate", // AND #$00
 	"2A", 1, "ROL", "accumulator", // ROL
 	"2B", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"2C", 3, "BIT", "$absolute", // BIT $0000
@@ -97,11 +97,11 @@ const opcode opcodes[256] =
 	"42", 0, "UNDEFINED", "unknown", // UNDEFINED
 	"43", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"44", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"45", 2, "EOR", "$zero page", // EOR $00  
-	"46", 2, "LSR", "$zero page", // LSR $00  
+	"45", 2, "EOR", "$zero page", // EOR $00
+	"46", 2, "LSR", "$zero page", // LSR $00
 	"47", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"48", 1, "PHA", "implied", // PHA
-	"49", 2, "EOR", "#immediate", // EOR #$00 
+	"49", 2, "EOR", "#immediate", // EOR #$00
 	"4A", 1, "LSR", "accumulator", // LSR
 	"4B", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"4C", 3, "JMP", "$absolute", // JMP $0000
@@ -129,11 +129,11 @@ const opcode opcodes[256] =
 	"62", 0, "UNDEFINED", "unknown", // UNDEFINED
 	"63", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"64", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"65", 2, "ADC", "$zero page", // ADC $00  
-	"66", 2, "ROR", "$zero page", // ROR $00  
+	"65", 2, "ADC", "$zero page", // ADC $00
+	"66", 2, "ROR", "$zero page", // ROR $00
 	"67", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"68", 1, "PLA", "implied", // PLA
-	"69", 2, "ADC", "#immediate", // ADC #$00 
+	"69", 2, "ADC", "#immediate", // ADC #$00
 	"6A", 1, "ROR", "accumulator", // ROR
 	"6B", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"6C", 3, "JMP", "($indirect)", // JMP ($0000)
@@ -196,9 +196,9 @@ const opcode opcodes[256] =
 	"A5", 2, "LDA", "$zero page", // LDA $00
 	"A6", 2, "LDX", "$zero page", // LDX $00
 	"A7", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"A8", 1, "TAY", "implied", // TAY      
-	"A9", 2, "LDA", "#immediate", // LDA #$00 
-	"AA", 1, "TAX", "implied", // TAX      
+	"A8", 1, "TAY", "implied", // TAY
+	"A9", 2, "LDA", "#immediate", // LDA #$00
+	"AA", 1, "TAX", "implied", // TAX
 	"AB", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"AC", 3, "LDY", "$absolute", // LDY $0000
 	"AD", 3, "LDA", "$absolute", // LDA $0000
@@ -212,25 +212,25 @@ const opcode opcodes[256] =
 	"B5", 2, "LDA", "$zero page,X", // LDA $00,X
 	"B6", 2, "LDX", "$zero page,Y", // LDX $00,Y
 	"B7", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"B8", 1, "CLV", "implied", // CLV      
+	"B8", 1, "CLV", "implied", // CLV
 	"B9", 3, "LDA", "$absolute,Y", // LDA $0000,Y
-	"BA", 1, "TSX", "implied", // TSX      
+	"BA", 1, "TSX", "implied", // TSX
 	"BB", 3, "UNDEFINED", "unknown", // UNDEFINED
 	"BC", 3, "LDY", "$absolute,X", // LDY $0000,X
 	"BD", 3, "LDA", "$absolute,X", // LDA $0000,X
 	"BE", 3, "LDX", "$absolute,Y", // LDX $0000,Y
 	"BF", 3, "UNDEFINED", "unknown", // UNDEFINED
-	"C0", 2, "CPY", "#immediate", // CPY #$00 
+	"C0", 2, "CPY", "#immediate", // CPY #$00
 	"C1", 2, "CMP", "($indirect,X)", // CMP ($00,X)
 	"C2", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"C3", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"C4", 2, "CPY", "$zero page", // CPY $00  
-	"C5", 2, "CMP", "$zero page", // CMP $00  
-	"C6", 2, "DEC", "$zero page", // DEC $00  
+	"C4", 2, "CPY", "$zero page", // CPY $00
+	"C5", 2, "CMP", "$zero page", // CMP $00
+	"C6", 2, "DEC", "$zero page", // DEC $00
 	"C7", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"C8", 1, "INY", "implied", // INY      
-	"C9", 2, "CMP", "#immediate", // CMP #$00 
-	"CA", 1, "DEX", "implied", // DEX      
+	"C8", 1, "INY", "implied", // INY
+	"C9", 2, "CMP", "#immediate", // CMP #$00
+	"CA", 1, "DEX", "implied", // DEX
 	"CB", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"CC", 3, "CPY", "$absolute", // CPY $0000
 	"CD", 3, "CMP", "$absolute", // CMP $0000
@@ -244,7 +244,7 @@ const opcode opcodes[256] =
 	"D5", 2, "CMP", "$zero page,X", // CMP $00,X
 	"D6", 2, "DEC", "$zero page,X", // DEC $00,X
 	"D7", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"D8", 1, "CLD", "implied", // CLD      
+	"D8", 1, "CLD", "implied", // CLD
 	"D9", 3, "CMP", "$absolute,Y", // CMP $0000,Y
 	"DA", 1, "UNDEFINED", "unknown", // UNDEFINED
 	"DB", 3, "UNDEFINED", "unknown", // UNDEFINED
@@ -252,17 +252,17 @@ const opcode opcodes[256] =
 	"DD", 3, "CMP", "$absolute,X", // CMP $0000,X
 	"DE", 3, "DEC", "$absolute,X", // DEC $0000,X
 	"DF", 3, "UNDEFINED", "unknown", // UNDEFINED
-	"E0", 2, "CPX", "#immediate", // CPX #$00 
+	"E0", 2, "CPX", "#immediate", // CPX #$00
 	"E1", 2, "SBC", "($indirect,X)", // SBC ($00,X)
 	"E2", 2, "UNDEFINED", "unknown", // UNDEFINED
 	"E3", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"E4", 2, "CPX", "$zero page", // CPX $00  
-	"E5", 2, "SBC", "$zero page", // SBC $00  
-	"E6", 2, "INC", "$zero page", // INC $00  
+	"E4", 2, "CPX", "$zero page", // CPX $00
+	"E5", 2, "SBC", "$zero page", // SBC $00
+	"E6", 2, "INC", "$zero page", // INC $00
 	"E7", 2, "UNDEFINED", "unknown", // UNDEFINED
-	"E8", 1, "INX", "implied", // INX      
-	"E9", 2, "SBC", "#immediate", // SBC #$00 
-	"EA", 1, "NOP", "implied", // NOP      
+	"E8", 1, "INX", "implied", // INX
+	"E9", 2, "SBC", "#immediate", // SBC #$00
+	"EA", 1, "NOP", "implied", // NOP
 	"EB", 2, "SBC", "#immediate", // undocumented alias of SBC #$00
 	"EC", 3, "CPX", "$absolute", // CPX $0000
 	"ED", 3, "SBC", "$absolute", // SBC $0000
@@ -285,3 +285,4 @@ const opcode opcodes[256] =
 	"FE", 3, "INC", "$absolute,X", // INC $0000,X
 	"FF", 3, "UNDEFINED", "unknown", // UNDEFINED
 };
+// clang-format on

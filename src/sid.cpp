@@ -1,4 +1,4 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // MOS6581 / MOS8580 SID sound-chip emulation.
 
@@ -51,8 +51,8 @@ namespace
 	{
 		switch (func)
 		{
-		case 0: return std::pow(distance, -i);          // exponential
-		case 1: return 1.0 / (1.0 + i * distance);       // linear
+		case 0: return std::pow(distance, -i);            // exponential
+		case 1: return 1.0 / (1.0 + i * distance);        // linear
 		default: return 1.0 / (1.0 + (i * i) * distance); // quadratic
 		}
 	}
@@ -62,8 +62,8 @@ namespace
 		return (((val & 0x800) == 0) ? val : (val ^ 0xFFF)) << 1;
 	}
 
-	int calculate_pulldown(const double* distance_table, double topbit, double pulsestrength,
-	                       double threshold, int accumulator)
+	int calculate_pulldown(const double* distance_table, double topbit, double pulsestrength, double threshold,
+	                       int accumulator)
 	{
 		double bit[12];
 		for (int i = 0; i < 12; i++) bit[i] = (accumulator & (1 << i)) ? 1.0 : 0.0;
@@ -127,7 +127,11 @@ namespace
 
 void sid_init_tables()
 {
-	static const bool built = [] { build_tables(); return true; }();
+	static const bool built = []
+	{
+		build_tables();
+		return true;
+	}();
 	(void)built;
 }
 
@@ -239,8 +243,8 @@ uint16_t waveform_generator::output()
 		const uint32_t prev_acc = prev_v ? prev_v->accumulator : 0;
 		const uint32_t ix = (accumulator ^ (~prev_acc & ring_msb_mask)) >> 12;
 
-		waveform_output = static_cast<uint16_t>((wave ? wave[ix] : 0) &
-			(no_pulse | pulse_output) & no_noise_or_noise_output);
+		waveform_output = static_cast<uint16_t>((wave ? wave[ix] : 0) & (no_pulse | pulse_output) &
+		                                        no_noise_or_noise_output);
 
 		if (pulldown)
 		{
@@ -291,6 +295,7 @@ void waveform_generator::shift_phase2(int waveform_new)
 
 void waveform_generator::set_noise_output()
 {
+	// clang-format off
 	noise_output = static_cast<uint16_t>(
 		((shift_register & (1u << 2)) << 9) |
 		((shift_register & (1u << 4)) << 6) |
@@ -300,6 +305,7 @@ void waveform_generator::set_noise_output()
 		((shift_register & (1u << 17)) >> 12) |
 		((shift_register & (1u << 20)) >> 16) |
 		((shift_register & (1u << 22)) >> 22));
+	// clang-format on
 	set_no_noise_or_noise_output();
 }
 
@@ -331,8 +337,16 @@ void waveform_generator::write_control(uint8_t control)
 	const bool test_old = test;
 	test = (control & 0x08) != 0;
 
-	if (waveform_new >= 8) { no_noise = 0; set_noise_output(); }
-	else { no_noise = 0xFFF; set_no_noise_or_noise_output(); }
+	if (waveform_new >= 8)
+	{
+		no_noise = 0;
+		set_noise_output();
+	}
+	else
+	{
+		no_noise = 0xFFF;
+		set_no_noise_or_noise_output();
+	}
 
 	no_pulse = (waveform_new >= 4 && waveform_new < 8) ? 0 : 0xFFF;
 
@@ -357,10 +371,12 @@ void waveform_generator::write_control(uint8_t control)
 
 namespace
 {
+	// clang-format off
 	const uint16_t ADSR_TABLE[16] = {
 		0x007F, 0x3000, 0x1E00, 0x0660, 0x0182, 0x5573, 0x000E, 0x3805,
 		0x2424, 0x2220, 0x090C, 0x0ECD, 0x010E, 0x23F7, 0x5237, 0x64A8
 	};
+	// clang-format on
 }
 
 void envelope_generator::reset()
@@ -417,8 +433,7 @@ void envelope_generator::clock()
 	else if (exponential_pipeline != 0 && (--exponential_pipeline == 0))
 	{
 		exponential_counter = 0;
-		if ((state == DECAY_SUSTAIN && envelope_counter != sustain) || state == RELEASE)
-			envelope_pipeline = 1;
+		if ((state == DECAY_SUSTAIN && envelope_counter != sustain) || state == RELEASE) envelope_pipeline = 1;
 	}
 	else if (reset_lfsr)
 	{
@@ -468,15 +483,13 @@ void envelope_generator::state_change()
 		}
 		break;
 	case RELEASE:
-		if ((state == ATTACK && state_pipeline == 0) ||
-			(state == DECAY_SUSTAIN && state_pipeline == 1))
+		if ((state == ATTACK && state_pipeline == 0) || (state == DECAY_SUSTAIN && state_pipeline == 1))
 		{
 			state = RELEASE;
 			rate = ADSR_TABLE[release];
 		}
 		break;
-	default:
-		break;
+	default: break;
 	}
 }
 
@@ -484,7 +497,8 @@ void envelope_generator::set_exponential_counter()
 {
 	switch (envelope_counter)
 	{
-	case 0xFF: case 0x00: new_exponential_counter_period = 1; break;
+	case 0xFF:
+	case 0x00: new_exponential_counter_period = 1; break;
 	case 0x5D: new_exponential_counter_period = 2; break;
 	case 0x36: new_exponential_counter_period = 4; break;
 	case 0x1A: new_exponential_counter_period = 8; break;
@@ -506,8 +520,7 @@ void envelope_generator::write_control(uint8_t control)
 		state_pipeline = 2;
 		if (reset_lfsr || exponential_pipeline == 2)
 			envelope_pipeline = (exponential_counter_period == 1 || exponential_pipeline == 2) ? 2 : 4;
-		else if (exponential_pipeline == 1)
-			state_pipeline = 3;
+		else if (exponential_pipeline == 1) state_pipeline = 3;
 	}
 	else
 	{
@@ -532,66 +545,76 @@ void envelope_generator::write_sustain_release(uint8_t v)
 }
 
 // ===========================================================================
-// Filters
+// Mixer and filter
 // ===========================================================================
 
 namespace
 {
-	constexpr int MAX_FILTER_STATE = 0x7FFFFF;
-
-	// Model constants, built once and shared by every sid_filter instance.
-	struct filter_freq_tables
-	{
-		float t6581[2048];
-		float t8580[2048];
-
-		filter_freq_tables()
-		{
-			constexpr double filter_curve = 0.5;
-			for (int i = 0; i < 2048; i++)
-			{
-				const double fc_n = i / 2048.0;
-				const double x = fc_n * (1 + filter_curve * 0.5);
-				t6581[i] = static_cast<float>(std::pow(x, 1.0 + filter_curve) * 0.04);
-				t8580[i] = static_cast<float>(0.002 + fc_n * 0.045);
-			}
-		}
-	};
-
-	const filter_freq_tables& freq_tables()
-	{
-		static const filter_freq_tables tables;
-		return tables;
-	}
+	constexpr double pi = 3.14159265358979323846;
 }
 
-sid_filter::sid_filter(bool is_6581)
+double sid_filter::cutoff_hz(const bool is_6581, const int fc)
+{
+	if (!is_6581) return 30.0 + 6.1 * fc;
+
+	// A logistic in log frequency, steeper below its midpoint than above it,
+	// follows the measured curve's flat bottom, steep middle and slow top.
+	constexpr double mid = 810.0;
+	const double spread = fc < mid ? 190.0 : 260.0;
+	const double rise = 1.0 / (1.0 + std::exp((mid - fc) / spread));
+	return 220.0 * std::exp(4.404 * rise);
+}
+
+double sid_filter::resonance_q(const bool is_6581, const int res)
+{
+	const double top = is_6581 ? 1.707 : 2.2;
+	return 0.707 + (top - 0.707) * (res & 0x0F) / 15.0;
+}
+
+sid_filter::sid_filter(const bool is_6581)
 {
 	set_model(is_6581);
 	reset();
 }
 
-void sid_filter::set_model(bool is_6581)
+void sid_filter::set_model(const bool is_6581)
 {
 	is6581 = is_6581;
-	freq_table = is_6581 ? freq_tables().t6581 : freq_tables().t8580;
+	// The 6581's waveform DAC is zero at about $380 and each voice adds a DC
+	// level, less a smaller one in the mixer, all scaled by the volume register.
+	// The 8580 is centred and has neither, so its $D418 digis are near silent.
+	wave_zero = is_6581 ? 896.0f : 2048.0f;
+	voice_dc = is_6581 ? 1.0f : 0.0f;
+	mixer_dc = is_6581 ? -0.111f : 0.0f;
+	q_inv = 1.0 / resonance_q(is6581, res);
 	update_w0();
-	update_digi_dc();
+}
+
+void sid_filter::set_clock_frequency(const double hz)
+{
+	clock_hz = hz > 0 ? hz : 985248;
+	update_w0();
+}
+
+void sid_filter::update_w0()
+{
+	w0 = 2.0 * pi * cutoff_hz(is6581, fc) / clock_hz;
 }
 
 void sid_filter::reset()
 {
-	write_fc_lo(0);
-	write_fc_hi(0);
+	fc = 0;
+	update_w0();
 	write_mode_vol(0);
 	write_res_filt(0);
 	vhp = vbp = vlp = 0;
 }
 
-void sid_filter::write_res_filt(uint8_t v)
+void sid_filter::write_res_filt(const uint8_t v)
 {
 	filt = v;
-	update_resonance((v >> 4) & 0x0F);
+	res = (v >> 4) & 0x0F;
+	q_inv = 1.0 / resonance_q(is6581, res);
 	if (enabled)
 	{
 		filt1 = (filt & 0x01) != 0;
@@ -601,110 +624,201 @@ void sid_filter::write_res_filt(uint8_t v)
 	}
 }
 
-void sid_filter::write_mode_vol(uint8_t v)
+void sid_filter::write_mode_vol(const uint8_t v)
 {
 	vol = v & 0x0F;
 	lp = (v & 0x10) != 0;
 	bp = (v & 0x20) != 0;
 	hp = (v & 0x40) != 0;
 	voice3off = (v & 0x80) != 0;
-	update_digi_dc();
 }
 
-void sid_filter::enable(bool e)
+void sid_filter::enable(const bool e)
 {
 	enabled = e;
 	if (e) write_res_filt(filt);
 	else filt1 = filt2 = filt3 = filtE = false;
 }
 
-int sid_filter::normalized_voice(voice* v) const
+float sid_filter::voice_output(voice& v, const bool muted) const
 {
-	const int wav = v->wave.output();
-	const int env = v->envelope.output();
-	return ((wav - 2048) * env) >> 3;
+	// Clocked whatever the mute: the waveform generator's state (the combined
+	// waveforms' writeback into the noise register) depends on output().
+	const int wav = v.wave.output();
+	if (muted) return voice_dc;
+	const int env = v.envelope.output();
+	return (static_cast<float>(wav) - wave_zero) * static_cast<float>(env) * (1.0f / (2048.0f * 255.0f)) + voice_dc;
 }
 
-void sid_filter::route_voices(voice& v1, voice& v2, voice& v3, int& vi, int& vo)
+float sid_filter::clock(voice& v1, voice& v2, voice& v3)
 {
-	// A muted voice is still clocked through output(): the waveform generator's
-	// state (combined-waveform writeback into the noise register) depends on it.
-	int a = normalized_voice(&v1);
-	int b = normalized_voice(&v2);
-	int c;
-	if (voice3off && !filt3) { v3.wave.output(); c = 0; }
-	else c = normalized_voice(&v3);
-	if (mute_mask & 0x01) a = 0;
-	if (mute_mask & 0x02) b = 0;
-	if (mute_mask & 0x04) c = 0;
+	const float a = voice_output(v1, (mute_mask & 0x01) != 0);
+	const float b = voice_output(v2, (mute_mask & 0x02) != 0);
+	const float c = voice_output(v3, (mute_mask & 0x04) != 0);
 
-	vi = 0;
-	if (filt1) vi += a;
-	if (filt2) vi += b;
-	if (filt3) vi += c;
-	if (filtE) vi += ve;
+	// 3OFF takes voice 3 off the direct path only: routed through the filter it
+	// is still heard.
+	double vi = 0, vnf = 0;
+	// clang-format off
+	if (filt1) vi += a; else vnf += a;
+	if (filt2) vi += b; else vnf += b;
+	if (filt3) vi += c; else if (!voice3off) vnf += c;
+	if (filtE) vi += ve; else vnf += ve;
+	// clang-format on
 
-	vo = 0;
-	if (!filt1) vo += a;
-	if (!filt2) vo += b;
-	if (!filt3 && !voice3off) vo += c;
-	if (!filtE) vo += ve;
+	// The two integrators, whose outputs are inverted as the chip's are: the
+	// low pass settles at -vi. Q only shapes the peak; the pass band stays at
+	// unity gain whatever the resonance.
+	vbp -= w0 * vhp;
+	vlp -= w0 * vbp;
+	vhp = vbp * q_inv - vlp - vi;
+
+	double vf = 0;
+	if (lp) vf += vlp;
+	if (bp) vf += vbp;
+	if (hp) vf += vhp;
+
+	return static_cast<float>((vnf + vf + mixer_dc) * vol * (1.0 / 15.0));
 }
 
-void sid_filter::apply_filter(int vi)
+void external_filter::set_clock_frequency(const double frequency)
 {
-	const double q_inv = resonance_coeff;
-	vhp = static_cast<int>(vi * q_inv - vlp - vbp * q_inv);
-	vbp = static_cast<int>(vbp + w0 * vhp);
-	vlp = static_cast<int>(vlp + w0 * vbp);
-
-	vhp = std::clamp(vhp, -MAX_FILTER_STATE, MAX_FILTER_STATE);
-	vbp = std::clamp(vbp, -MAX_FILTER_STATE, MAX_FILTER_STATE);
-	vlp = std::clamp(vlp, -MAX_FILTER_STATE, MAX_FILTER_STATE);
+	w_lp = 2.0 * pi * 16000.0 / frequency;
+	w_hp = 2.0 * pi * 16.0 / frequency;
 }
 
-int sid_filter::mix_output(int vo)
-{
-	if (lp) vo += vlp;
-	if (bp) vo += vbp;
-	if (hp) vo += vhp;
+// ===========================================================================
+// Resampler
+// ===========================================================================
 
-	// Unclipped: the single clip point is applied after the output gain.
-	return ((vo * vol) >> 4) + digi_dc;
+namespace
+{
+	double bessel_i0(const double x)
+	{
+		const double quarter_square = x * x / 4.0;
+		double sum = 1.0;
+		double term = 1.0;
+		for (int k = 1; k < 64; ++k)
+		{
+			term *= quarter_square / (static_cast<double>(k) * k);
+			sum += term;
+			if (term < sum * 1e-12) break;
+		}
+		return sum;
+	}
+
+	// A Kaiser-windowed sinc low-pass tap: cutoff in cycles per sample, t in
+	// samples from the centre, half the window's half-width.
+	double windowed_sinc(const double cutoff, const double t, const double half, const double beta)
+	{
+		if (std::abs(t) >= half) return 0.0;
+		const double x = 2.0 * cutoff * t;
+		const double sinc = std::abs(x) < 1e-12 ? 1.0 : std::sin(pi * x) / (pi * x);
+		const double r = t / half;
+		return 2.0 * cutoff * sinc * bessel_i0(beta * std::sqrt(1.0 - r * r)) / bessel_i0(beta);
+	}
 }
 
-int sid_filter::clock(voice& v1, voice& v2, voice& v3)
+void sid_resampler::configure(const double clock_hz, const double output_hz)
 {
-	int vi, vo;
-	route_voices(v1, v2, v3, vi, vo);
-	apply_filter(vi);
-	return mix_output(vo);
+	// The first stage is flat to 20 kHz and 80 dB down from the lowest frequency
+	// that taking every eighth cycle folds back below 24 kHz.
+	const double a_cutoff = 59200.0 / clock_hz;
+	double a_sum = 0;
+	for (int k = 0; k < a_taps; ++k)
+	{
+		const double tap = windowed_sinc(a_cutoff, k - (a_taps - 1) / 2.0, a_taps / 2.0, 7.86);
+		a_coeff[k] = static_cast<float>(tap);
+		a_sum += tap;
+	}
+	for (auto& c : a_coeff) c = static_cast<float>(c / a_sum);
+
+	// The second cuts at the output's Nyquist frequency, 70 dB down 2 kHz past
+	// it, so anything that still folds back lands above 20 kHz. Each phase's
+	// row is normalised, so no phase adds a DC ripple of its own.
+	const double mid_hz = clock_hz / decimation;
+	b_step = mid_hz / output_hz;
+	const double b_cutoff = std::min(0.5 * output_hz, 0.45 * mid_hz) / mid_hz;
+	b_table.assign(static_cast<size_t>(b_phases + 1) * b_taps, 0.0f);
+	for (int p = 0; p <= b_phases; ++p)
+	{
+		float* row = b_table.data() + static_cast<size_t>(p) * b_taps;
+		const double offset = static_cast<double>(p) / b_phases - b_taps / 2.0;
+		double row_sum = 0;
+		for (int j = 0; j < b_taps; ++j)
+		{
+			const double tap = windowed_sinc(b_cutoff, j + offset, b_taps / 2.0, 6.76);
+			row[j] = static_cast<float>(tap);
+			row_sum += tap;
+		}
+		for (int j = 0; j < b_taps; ++j) row[j] = static_cast<float>(row[j] / row_sum);
+	}
+
+	reset();
 }
 
-void external_filter::set_clock_frequency(double frequency)
+void sid_resampler::reset()
 {
-	const double w0lp = 2 * 3.14159265358979323846 * 16000 / frequency;
-	const double w0hp = 2 * 3.14159265358979323846 * 1.6 / frequency;
-	w0lp_1_s7 = static_cast<int64_t>(std::lround(w0lp * (1 << 7)));
-	w0hp_1_s17 = static_cast<int64_t>(std::lround(w0hp * (1 << 17)));
+	std::memset(a_ring, 0, sizeof(a_ring));
+	std::memset(b_ring, 0, sizeof(b_ring));
+	a_pos = 0;
+	a_count = 0;
+	b_pos = 0;
+	b_acc = 0;
 }
 
-int external_filter::clock(int input)
+bool sid_resampler::decimated(float& out)
 {
-	const int64_t vi = static_cast<int64_t>(input) << 11;
-	const int64_t d_vlp = (w0lp_1_s7 * (vi - vlp)) >> 7;
-	const int64_t d_vhp = (w0hp_1_s17 * (vlp - vhp)) >> 17;
-	vlp += d_vlp;
-	vhp += d_vhp;
-	return static_cast<int>((vlp - vhp) >> 11);
+	// a_ring and b_ring hold each sample twice, so the window from the oldest
+	// sample on is always contiguous. Four running sums rather than one let the
+	// additions overlap instead of waiting on each other.
+	const float* a = a_ring + a_pos;
+	float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+	for (int k = 0; k < a_taps; k += 4)
+	{
+		s0 += a_coeff[k] * a[k];
+		s1 += a_coeff[k + 1] * a[k + 1];
+		s2 += a_coeff[k + 2] * a[k + 2];
+		s3 += a_coeff[k + 3] * a[k + 3];
+	}
+	const float y = (s0 + s1) + (s2 + s3);
+
+	b_ring[b_pos] = y;
+	b_ring[b_pos + b_taps] = y;
+	if (++b_pos == b_taps) b_pos = 0;
+
+	b_acc += 1.0;
+	if (b_acc < b_step) return false;
+	b_acc -= b_step;
+
+	// The output is due b_acc decimated samples before the newest one: blend the
+	// two tabulated phases either side of it.
+	const double phase = b_acc * b_phases;
+	int p = static_cast<int>(phase);
+	if (p >= b_phases) p = b_phases - 1;
+	const float frac = static_cast<float>(phase - p);
+	const float* row0 = b_table.data() + static_cast<size_t>(p) * b_taps;
+	const float* row1 = row0 + b_taps;
+	const float* x = b_ring + b_pos;
+	float p0 = 0, p1 = 0, q0 = 0, q1 = 0;
+	for (int j = 0; j < b_taps; j += 2)
+	{
+		p0 += row0[j] * x[j];
+		p1 += row0[j + 1] * x[j + 1];
+		q0 += row1[j] * x[j];
+		q1 += row1[j + 1] * x[j + 1];
+	}
+	const float y0 = p0 + p1;
+	const float y1 = q0 + q1;
+	out = y0 + (y1 - y0) * frac;
+	return true;
 }
 
 // ===========================================================================
 // SID chip
 // ===========================================================================
 
-sid_chip::sid_chip()
-	: filter(false)
+sid_chip::sid_chip() : filter(true)
 {
 	sid_init_tables();
 
@@ -712,16 +826,15 @@ sid_chip::sid_chip()
 	voices[1].wave.set_other(&voices[0].wave, &voices[2].wave);
 	voices[2].wave.set_other(&voices[1].wave, &voices[0].wave);
 
+	set_chip_model(sid_model::mos6581);
 	set_sampling_parameters(985248, 44100);
-	set_chip_model(sid_model::mos8580);
 	reset();
 }
 
-void sid_chip::set_chip_model(sid_model m)
+void sid_chip::set_chip_model(const sid_model m)
 {
 	const bool is6581 = m == sid_model::mos6581;
-	if (is6581) { scale_factor = 0.15; model_ttl = 0x01D00; }
-	else { scale_factor = 0.20; model_ttl = 0xA2000; }
+	model_ttl = is6581 ? 0x01D00 : 0xA2000;
 	model = m;
 	filter.set_model(is6581);
 
@@ -734,14 +847,19 @@ void sid_chip::set_chip_model(sid_model m)
 	}
 }
 
-void sid_chip::set_sampling_parameters(double clk, double samp)
+void sid_chip::set_sampling_parameters(const double clk, double samp)
 {
+	if (clk <= 0 || samp <= 0) return;
+	// One output sample per decimated sample at most, which the chip's clock
+	// leaves room for up to 96 kHz.
+	samp = std::clamp(samp, 8000.0, 96000.0);
+	if (clk == clock_frequency && samp == sampling_frequency) return;
+
 	clock_frequency = clk;
 	sampling_frequency = samp;
-	cycles_per_sample = static_cast<int>(std::floor(clk / samp * 1024));
-	sample_offset = 0;
+	filter.set_clock_frequency(clk);
 	ext_filter.set_clock_frequency(clk);
-	init_fir_filter(clk, samp);
+	resampler.configure(clk, samp);
 }
 
 void sid_chip::reset()
@@ -749,14 +867,10 @@ void sid_chip::reset()
 	for (auto& v : voices) v.reset();
 	filter.reset();
 	ext_filter.reset();
+	resampler.reset();
 	bus_value = 0;
 	bus_value_ttl = 0;
 	write_queue.clear();
-	dc_offset = 0;
-	std::memset(fir_buffer, 0, sizeof(fir_buffer));
-	fir_index = 0;
-	sample_offset = 0;
-	output_value = 0;
 	voice_sync(false);
 }
 
@@ -777,7 +891,8 @@ uint8_t sid_chip::read(uint16_t offset)
 {
 	switch (offset)
 	{
-	case 0x19: case 0x1A:
+	case 0x19:
+	case 0x1A:
 		bus_value = 0xFF;
 		bus_value_ttl = model_ttl;
 		break;
@@ -789,9 +904,7 @@ uint8_t sid_chip::read(uint16_t offset)
 		bus_value = voices[2].envelope.read_env();
 		bus_value_ttl = model_ttl;
 		break;
-	default:
-		bus_value_ttl /= 2;
-		break;
+	default: bus_value_ttl /= 2; break;
 	}
 	return bus_value;
 }
@@ -848,7 +961,11 @@ void sid_chip::age_bus_value(int n)
 	if (bus_value_ttl != 0)
 	{
 		bus_value_ttl -= n;
-		if (bus_value_ttl <= 0) { bus_value = 0; bus_value_ttl = 0; }
+		if (bus_value_ttl <= 0)
+		{
+			bus_value = 0;
+			bus_value_ttl = 0;
+		}
 	}
 }
 
@@ -863,66 +980,23 @@ void sid_chip::voice_sync(bool sync)
 		const uint16_t freq = v.wave.read_freq();
 		if (v.wave.read_test() || freq == 0 || !v.wave.read_following_voice_sync()) continue;
 		const uint32_t acc = v.wave.read_accumulator();
-		const int64_t this_sync = static_cast<int64_t>(((0x7FFFFF - acc) & 0xFFFFFF) / freq + 1);
+		const int64_t this_sync = ((0x7FFFFF - acc) & 0xFFFFFF) / freq + 1;
 		if (this_sync < next_voice_sync) next_voice_sync = this_sync;
 	}
 }
 
-void sid_chip::init_fir_filter(double clk, double samp)
+int16_t sid_chip::output_sample(const float value) const
 {
-	const double oversample = clk / samp;
-	const double cutoff = 0.9 / oversample;
-	const double center = (FIR_LEN - 1) / 2.0;
-	double sum = 0;
-
-	for (int i = 0; i < FIR_LEN; i++)
-	{
-		const double x = i - center;
-		double sinc;
-		if (std::abs(x) < 0.0001) sinc = 1.0;
-		else { const double arg = 3.14159265358979323846 * x * cutoff * 2; sinc = std::sin(arg) / arg; }
-		const double window = 0.42 - 0.5 * std::cos(2 * 3.14159265358979323846 * i / (FIR_LEN - 1))
-			+ 0.08 * std::cos(4 * 3.14159265358979323846 * i / (FIR_LEN - 1));
-		fir_coeffs[i] = static_cast<float>(sinc * window);
-		sum += fir_coeffs[i];
-	}
-	for (int i = 0; i < FIR_LEN; i++) fir_coeffs[i] = static_cast<float>(fir_coeffs[i] / sum);
-
-	std::memset(fir_buffer, 0, sizeof(fir_buffer));
-	fir_index = 0;
-}
-
-bool sid_chip::resampler_input(double sample)
-{
-	static_assert((FIR_LEN & (FIR_LEN - 1)) == 0, "FIR_LEN must be a power of two");
-
-	fir_buffer[fir_index] = static_cast<float>(sample);
-	fir_index = (fir_index + 1) & (FIR_LEN - 1);
-
-	bool ready = false;
-	if (sample_offset < 1024)
-	{
-		float filtered = 0;
-		int buf_idx = fir_index;
-		for (int i = 0; i < FIR_LEN; i++)
-		{
-			buf_idx = (buf_idx - 1) & (FIR_LEN - 1);
-			filtered += fir_buffer[buf_idx] * fir_coeffs[i];
-		}
-		output_value = filtered;
-		ready = true;
-		sample_offset += cycles_per_sample;
-	}
-	sample_offset -= 1024;
-	return ready;
-}
-
-int sid_chip::resampler_output()
-{
-	const double scaled = output_value * scale_factor;
-	const double dc_filtered = scaled - dc_offset;
-	dc_offset += dc_filtered * 0.005;
-	return static_cast<int>(std::clamp(dc_filtered, -32768.0, 32767.0));
+	// A voice at full envelope swings about 7000 either way. Past three quarters
+	// of full scale the output bends smoothly towards it instead of clipping, so
+	// a resonant peak or the 6581's volume step never turns into a hard edge.
+	constexpr float gain = 7000.0f;
+	constexpr float knee = 24576.0f;
+	constexpr float room = 32767.0f - knee;
+	float x = value * gain;
+	const float magnitude = std::abs(x);
+	if (magnitude > knee) x = std::copysign(knee + room * std::tanh((magnitude - knee) / room), x);
+	return static_cast<int16_t>(std::lround(x));
 }
 
 int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_samples)
@@ -942,11 +1016,14 @@ int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_sampl
 		}
 
 		int64_t next_event = end_cycle;
-		if (queue_index < write_queue.size())
-			next_event = std::min(next_event, write_queue[queue_index].cycle);
+		if (queue_index < write_queue.size()) next_event = std::min(next_event, write_queue[queue_index].cycle);
 
 		const int64_t to_run = std::min(next_event - current_cycle, next_voice_sync);
-		if (to_run <= 0) { current_cycle++; continue; }
+		if (to_run <= 0)
+		{
+			current_cycle++;
+			continue;
+		}
 
 		for (int64_t i = 0; i < to_run; i++)
 		{
@@ -957,14 +1034,11 @@ int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_sampl
 			voices[1].envelope.clock();
 			voices[2].envelope.clock();
 
-			const int sid_output = filter.clock(voices[0], voices[1], voices[2]);
-			const int c64_output = ext_filter.clock(sid_output);
+			const float mixed = filter.clock(voices[0], voices[1], voices[2]);
+			const auto heard = static_cast<float>(ext_filter.clock(mixed));
 
-			if (resampler_input(c64_output))
-			{
-				const int sample = resampler_output();
-				if (s < max_samples) buf[s++] = static_cast<int16_t>(sample);
-			}
+			float sample;
+			if (resampler.input(heard, sample) && s < max_samples) buf[s++] = output_sample(sample);
 		}
 
 		current_cycle += to_run;

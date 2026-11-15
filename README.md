@@ -1,63 +1,56 @@
-# lib8bit
+# lib64
 
-[![Build](https://github.com/ZacWalk/lib8bit/actions/workflows/build.yml/badge.svg)](https://github.com/ZacWalk/lib8bit/actions/workflows/build.yml)
+[![Build](https://github.com/ZacWalk/lib64/actions/workflows/build.yml/badge.svg)](https://github.com/ZacWalk/lib64/actions/workflows/build.yml)
 
 A compact Commodore 64 emulator packaged as a C++20 static library, plus a small
 Windows app built on the shared libdesktop platform layer.
 
 The library is platform independent and does no file I/O — the host supplies
-bytes, the library returns a frame buffer and audio samples. It is intended for
-embedding in applications such as Diffractor to add retro computer support.
+bytes, the library returns a frame buffer and audio samples. Diffractor embeds
+it to play SID tunes and to run disks, tapes, cartridges and programs.
 
-![lib8bit Windows host running a Commodore 64 BASIC demonstration](docs/screenshot.png)
+![lib64 Windows host running a Commodore 64 BASIC demonstration](docs/screenshot.png)
 
 *An original BASIC sample running in the emulator.*
-
-Repository: <https://github.com/ZacWalk/lib8bit>
 
 ## What is emulated
 
 | Chip | Coverage |
 |------|----------|
-| 6510 CPU | All documented opcodes and addressing modes (including the indirect-`JMP` page-wrap bug), BCD arithmetic, `BRK`/`RTI`/`IRQ`/`NMI`, cycle-accurate timing with page-crossing penalties |
-| Memory | Full banking through the processor port at `$00`/`$01`, BASIC/KERNAL/character ROMs, the I/O area |
-| VIC-II | 384×272 raster renderer: text, multicolor text, bitmap and multicolor bitmap modes, 8 sprites with expansion, priority and collisions, raster interrupts, 16-colour VICE palette |
-| SID | 6581/8580, three voices with ADSR envelopes, multi-mode filter, `.sid` (PSID/RSID) playback through the installed player driver, with an on-screen player: tune details, live voice meters, and sub-tune selection on the number keys |
-| CIA ×2 | Timers, interrupts, the full keyboard matrix, two joysticks |
-| Cartridge | `.crt` loading with ROML/ROMH banking |
+| 6510 CPU | Every opcode, the undocumented ones included, and every addressing mode (including the indirect-`JMP` page-wrap bug), BCD arithmetic, `BRK`/`RTI`/`IRQ`/`NMI`, per-instruction cycle counts with page-crossing penalties |
+| Memory | Full banking through the processor port at `$00`/`$01`, BASIC/KERNAL/character ROMs, the I/O area with its registers apart from the RAM beneath |
+| VIC-II | 384×272 raster renderer: standard, multicolor and extended-colour text, standard and multicolor bitmap, 38-column and 24-row borders, 8 sprites with expansion, priority and collisions, raster interrupts, bad lines and sprite fetches taking the CPU's cycles, 16-colour VICE palette |
+| SID | 6581/8580, three voices with ADSR envelopes, each chip's own filter, band-limited output at the host's sample rate; `.sid` (PSID/RSID) tunes, PAL or NTSC, play in an on-screen player |
+| CIA ×2 | Timers, interrupts, time-of-day clocks with their alarms, the full keyboard matrix, two joysticks |
+| Cartridge | `.crt` images in 8K, 16K and Ultimax modes, with bank switching for the common hardware types, EasyFlash among them |
 | Disk | `.d64`/`.d71`/`.d81` mounted as device 8: the KERNAL LOAD routine is serviced from the image, so a program can keep loading files while it runs, and `LOAD"$",8` lists the directory |
 
-Also included: `.prg` loading and a two-pass 6502 assembler.
+Also included: starting a disk's file, a `.prg`, a `.p00` or a `.t64` tape's
+file as a user would (`autostart_disk` types `LOAD"name",8,1` and `RUN` once
+BASIC is ready), and a two-pass 6502 assembler.
 
-How it all fits together is in [docs/design.md](docs/design.md). What is missing
-or approximate is in [docs/todo.md](docs/todo.md) — headline gaps are the
-undocumented CPU opcodes, the IEC serial bus (so a program supplying its own
-fastloader will not load), SAVE to disk, VIC bad-line cycle stealing and CIA TOD
-clocks.
-
-## Layout
-
-| Path | Contents |
-|------|----------|
-| `src/` | The emulator. Platform independent — no Windows headers, no file system. Builds the `lib8bit` static library. |
-| `app/` | Windows host: a libdesktop `ui::app` with a drawn menu bar, texture-backed screen, audio stream, drag-and-drop and C64 input mapping. |
-| `test/` | Command-line behavioural test suite and its fixtures. |
-| `docs/` | [design.md](docs/design.md) (architecture) and [todo.md](docs/todo.md) (gaps). |
+Not emulated: the IEC serial bus, so a program that brings its own fastloader
+gets no disk; SAVE, and reading a disk file through `OPEN`; and timing exact to
+the cycle within an instruction, which some demos depend on.
+[docs/design.md](docs/design.md) explains how each chip works and what it
+leaves out.
 
 ## Build and run
 
 The library and its test suite build on Windows with Visual Studio, x64 and
-x86, and on Linux with GCC 13; the app is Windows-only. The app uses the
-published libdesktop revision pinned in `CMakeLists.txt` (a sibling checkout is
-used for local development). On Windows the vendored
-[dd](https://github.com/ZacWalk/dd) runtime locates Visual Studio and uses the
-CMake and Ninja that ship with it.
+x86, and on Linux with GCC 13; the app is Windows-only. On Windows the vendored
+[dd](https://github.com/ZacWalk/dd) driver, run from PowerShell 7.4+, locates
+Visual Studio and uses the CMake and Ninja that ship with it:
 
 ```powershell
-.\dd.ps1 build        # both configurations
-.\dd.ps1 test         # build and run the emulator and offscreen host suites
-.\dd.ps1 launch       # build Release, then start the Windows app
+.\dd.ps1 build                  # both configurations
+.\dd.ps1 test --label lib64   # build both, then run the suites below
+.\dd.ps1 test --label headless # the same gate, no visible UI, real console check counts
+.\dd.ps1 launch                 # build Release, then start the app
 ```
+
+An unfiltered `.\dd.ps1 test` also starts the app to check that its window
+opens and closes.
 
 On Linux, with `g++`, `cmake` and `ninja-build` installed:
 
@@ -66,9 +59,32 @@ cmake --preset linux-release && cmake --build --preset linux-release
 ctest --preset linux-release     # or pwsh ./dd.ps1 test, for both configurations
 ```
 
-The app lands in `bin/` as `app8bit64r.exe` (Release) or `app8bit64d.exe`
-(Debug); the test binary is `lib8bit_tests` / `lib8bit_testsd`, with `.exe` on
-Windows.
+dd drives x64 only, so a 32-bit Windows build enters the x86 MSVC environment
+itself:
+
+```powershell
+$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+& $env:ComSpec /c "call `"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64_x86 >nul && cmake -S . -B build\x86-windows\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl && cmake --build build\x86-windows\release && ctest --test-dir build\x86-windows\release"
+```
+
+Executables land in `bin/`: `app8bit64r.exe` (Release) and `app8bit64d.exe`
+(Debug) for the app, `lib64_tests` and `lib64_testsd` (`.exe` on Windows)
+for the suite. A 32-bit build names them `app8bit32*` and `lib64_tests32*`.
+The library and the intermediates stay under `build/<platform>/<config>/`.
+
+The app builds against the libdesktop revision pinned by `GIT_TAG` in
+`CMakeLists.txt`, or against a sibling `..\libdesktop` checkout when there is
+one.
+
+### Host app icon
+
+`python tools\generate_icon.py` regenerates `app\res\c64.ico`: vector C64
+lettering over five horizontal rainbow bands that fill the circle.
+The ICO contains nine desktop sizes. Add `--check` to verify without writing,
+or `--output tmp\icon-128.png --size 128` for another size. The generator needs
+only Python 3.9+'s standard library and the vendored `tools\iconlib.py`, not a
+font, graphics package or sibling checkout.
+`python tools\test_generate_icon.py` checks the stripe coverage and lettering.
 
 ## The app
 
@@ -76,87 +92,77 @@ Open a `.prg`, `.crt`, `.sid`, `.d64`, `.d71` or `.d81` through **File > Open**,
 by dragging it onto the window, or by passing it on the command line. A file
 with no extension is taken for a program; anything else is refused, leaving the
 running machine alone. A disk image stays in the drive after its first program
-starts, so games that load more data as they run work. The title bar always
-states the current machine state:
-media, input mode, pause, and whether audio started. Window position and the
-debug panel's width and visibility are remembered in
-`%APPDATA%\lib8bit\lib8bit.ini` through libdesktop's shared INI store.
+starts, so games that load more data as they run work. A `.sid` tune comes up
+in a player screen showing its details, a running clock, live per-voice level
+meters and its sub-tunes: **1**-**9** pick a sub-tune and **X** stops playback.
 
-| | |
-|---|---|
-| Ctrl+O / Ctrl+R / Ctrl+E | Open, Reset (keeps the cartridge), Eject Media |
-| F9 | Pause |
-| Input menu | Arrow keys act as cursor keys, Joystick 1, or Joystick 2 |
-| Help > Keyboard | The emulated C64 key mapping |
-
-Keys are mapped by position, so Shift gives the C64's own shifted symbols
-(Shift+2 is `"`). The C64 keys a PC keyboard lacks sit where VICE puts them:
-`'` is `:`, `[` and `]` are `@` and `*`, `\` is the up arrow, Page Down is `=`
-and End is `£`. Esc is RUN/STOP and Page Up is RESTORE, so Esc+Page Up breaks
-into a running program.
-
-A `.sid` tune comes up in a player screen showing its name, author, release,
-chip and timing, a running clock, live per-voice level meters and the list of
-sub-tunes. Keys **1**-**9** pick a sub-tune and **X** stops playback and returns
-the machine to BASIC.
-
-## Embedding
-
-Link the `lib8bit` static library target and include `src/machine.h`. From CMake,
-bring this repository in with `add_subdirectory` or `FetchContent` and link
-`lib8bit::lib8bit`: it then builds with the consumer's compiler, configuration and
-C runtime, and builds neither the app nor the test suite. A prebuilt library
-needs the same architecture, configuration and C runtime library as its host.
-
-`machine` owns a `machine_state` and is non-copyable. Feed it bytes
-(`load_prg`, `load_crt`, `load_sid`, `insert_disk`), step it with `exec(cycles)`,
-then read `framebuffer()` and `generate_audio()`. For a SID monitor,
-`machine::parse_sid` reads a tune's header without loading it, `capture_sid`
-snapshots the registers, envelope levels and write counts, `set_sid_voice_muted`
-silences a voice and `reset` cold-starts the machine. `app/app.cpp` is a
-complete worked host, and [docs/design.md](docs/design.md) explains the
-execution model.
-
-The executable statically links [libdesktop](https://github.com/ZacWalk/libdesktop)
-under LGPL-2.1-or-later. A binary distribution must include the library's
-notices, licence, corresponding source (including modifications), and the
-application objects or build instructions needed to relink it with a modified
-libdesktop.
+Keys are mapped by position, as VICE maps them. The **Input** menu points the
+arrow keys at the C64 cursor keys or at joystick port 1 or 2, and
+**Help > Keyboard** lists the mapping and the shortcuts. The title bar states
+the media, input mode, pause state and whether audio started. Window placement
+and the debug panel's width and visibility are kept in
+`%APPDATA%\lib64\lib64.ini`.
 
 ## Tests
 
-`lib8bit_testsd` returns non-zero on failure after exercising every
-documented CPU opcode with flags and cycle counts, pixel-exact VIC-II output for
-each graphics mode and for sprite collisions, CIA timer and interrupt behaviour,
-the assembler, a full KERNAL cold boot to the `READY.` prompt, keyboard input
-evaluating `PRINT 6*7` as `42`, key taps shorter than a frame typing intact
-through `queue_key`, RUN/STOP+RESTORE, SID audio including a real `.sid` tune and
-the SID monitor hooks, disk loading through the KERNAL (a machine-code routine
-calling `SETNAM`/`SETLFS`/`LOAD`, `LOAD"$",8` and the `FILE NOT FOUND` path),
-and the PRG/CRT/D64 fixtures in `test/` (resolved from the source path baked in
-at compile time, so nothing needs copying next to the executable).
+`.\dd.ps1 test --label headless` (or `--label lib64`) runs, in both configurations:
 
-On Windows, CTest also runs `app8bit -test` with libdesktop's offscreen GUI
-mode. It checks integer-nearest layout and surface presentation, the
-`render::draw_context` texture repaint path, keyboard matrix taps, RESTORE/NMI,
-joystick tap/release handling, the background snapshot worker, minimum client
-size, capture-loss cleanup, end-session settings, splitter input and the
-bounded `platform::audio_stream` adapter without showing or focusing a window.
+- `lib64_tests`, the emulator suite. It prints a `PASS` or `FAIL` line per
+  check, a total of the checks actually executed, and exits non-zero on any failure. Its fixtures are read from `test/`
+  through the source path compiled in, so nothing needs copying next to the
+  executable.
+- On Windows, a check that the app embeds its application manifest, and the app
+  itself with `-test`: an offscreen run of its layout, presentation, input,
+  worker, settings and audio paths that never shows or focuses a window.
 
-It doubles as a small toolbox:
+Presets show successful output too. After building,
+`ctest --preset debug -L headless -V --no-tests=error` reruns without rebuilding
+(`release` or `linux-release` as appropriate). Await direct GUI tests by piping:
+`& .\bin\app8bit64r.exe -test 2>&1 | Out-Host; $LASTEXITCODE`.
+
+The suite doubles as a small toolbox:
 
 ```powershell
-.\bin\lib8bit_testsd.exe --list-disk .\test\1942.d64            # list a disk image
-.\bin\lib8bit_testsd.exe --run-disk .\test\1942.d64 "1942*"     # mount, LOAD, RUN
-.\bin\lib8bit_testsd.exe --run-prg .\test\example.prg           # boot, load, run a PRG
-.\bin\lib8bit_testsd.exe --run-bin <file> <loadHex> <startHex>  # run a raw 6502 binary
-.\bin\lib8bit_testsd.exe --asm <file.asm>                       # assemble 6502 source
+.\bin\lib64_testsd.exe --list-disk .\test\1942.d64            # list a disk image
+.\bin\lib64_testsd.exe --run-disk .\test\1942.d64 "1942*"     # mount, LOAD, RUN
+.\bin\lib64_testsd.exe --run-prg .\test\example.prg           # boot, load, run a PRG
+.\bin\lib64_testsd.exe --run-bin <file> <loadHex> <startHex>  # run a raw 6502 binary
+.\bin\lib64_testsd.exe --asm <file.asm>                       # assemble 6502 source
+.\bin\lib64_testsd.exe --render-sid <file.sid> <out.wav> [seconds] [song]  # render a tune
+.\bin\lib64_testsd.exe --snap <file> <out.bmp> [seconds] [name]  # start it, save the picture
 ```
+
+## Embedding
+
+From CMake, bring this repository in with `add_subdirectory` or `FetchContent`
+and link `lib64::lib64`: it then builds with the consumer's compiler,
+configuration and C runtime, and builds neither the app nor the test suite. A
+prebuilt library needs the same architecture, configuration and C runtime
+library as its host.
+
+Include `machine.h`, feed a `machine` bytes (`load_prg`, `load_crt`, `load_sid`,
+`insert_disk`, or `autostart_disk` and `autostart_prg` to start one as a user
+would), step it with `exec(cycles)`, then read `framebuffer()` and
+`generate_audio()`, at the rate `set_audio_sample_rate` asks for. The header
+documents every call, `app/app.cpp` is a complete worked host, and
+[docs/design.md](docs/design.md) explains the execution model and the SID
+monitor hooks.
+
+## Licence
+
+MIT; see [LICENSE](LICENSE). The C64 ROM images - `src/roms/` and the byte arrays
+in `src/rom-chars.cpp`, `src/rom-kernal-basic.cpp` and `src/rom-kernal.cpp` - and
+the programs, cartridges and tunes in `test/` belong to their copyright holders;
+the licence does not cover them.
+
+The app includes [libdesktop](https://github.com/ZacWalk/libdesktop), which is
+licensed under the Mozilla Public License 2.0: anyone distributing the app must
+tell its recipients where to get libdesktop's source code, including any changes
+made to it. `tools/iconlib.py` is vendored from libdesktop under the same licence.
 
 ## Reference implementation
 
-The JavaScript original is <https://github.com/ZacWalk/turbo8bit>. The native
-port has reached parity on the CPU, memory banking, VIC-II, SID and normal
-8/16 KiB cartridges.
+lib64 is a native port of [turbo8bit](https://github.com/ZacWalk/turbo8bit),
+a Commodore 64 emulator in JavaScript.
 
 Contributing, or working on this with an AI agent? See [AGENTS.md](AGENTS.md).

@@ -1,4 +1,4 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // Machine introspection (see debug.h): a passive read of the emulated chips
 // plus a 6502 disassembler driven by the shared opcode table.
@@ -17,14 +17,30 @@ namespace
 	// on. Matching the strings once here keeps the format table below readable.
 	enum addr_mode
 	{
-		AM_UNKNOWN, AM_IMPLIED, AM_ACCUMULATOR, AM_IMMEDIATE,
-		AM_ZP, AM_ZP_X, AM_ZP_Y, AM_ABS, AM_ABS_X, AM_ABS_Y,
-		AM_IND, AM_IND_X, AM_IND_Y, AM_RELATIVE,
+		AM_UNKNOWN,
+		AM_IMPLIED,
+		AM_ACCUMULATOR,
+		AM_IMMEDIATE,
+		AM_ZP,
+		AM_ZP_X,
+		AM_ZP_Y,
+		AM_ABS,
+		AM_ABS_X,
+		AM_ABS_Y,
+		AM_IND,
+		AM_IND_X,
+		AM_IND_Y,
+		AM_RELATIVE,
 	};
 
 	addr_mode mode_of(const char* name)
 	{
-		struct entry { const char* text; addr_mode mode; };
+		struct entry
+		{
+			const char* text;
+			addr_mode mode;
+		};
+		// clang-format off
 		static constexpr entry table[] = {
 			{"implied", AM_IMPLIED},
 			{"accumulator", AM_ACCUMULATOR},
@@ -40,6 +56,7 @@ namespace
 			{"($indirect),Y", AM_IND_Y},
 			{"relative", AM_RELATIVE},
 		};
+		// clang-format on
 		for (const entry& e : table)
 			if (std::strcmp(name, e.text) == 0) return e.mode;
 		return AM_UNKNOWN;
@@ -109,8 +126,7 @@ uint8_t debug_peek(const machine_state* s, const uint16_t address)
 		if (s->cart.enabled && s->cart.read(address, out)) return out;
 		if (s->read_map[address >> 8] == 6 && s->is_basic_on && address >= 0xA000 && address < 0xC000)
 			return rom_basic[address & 0x1FFF];
-		if (s->read_map[address >> 8] == 6 && s->is_kernal_on && address >= 0xE000)
-			return rom_kernal[address & 0x1FFF];
+		if (s->read_map[address >> 8] == 6 && s->is_kernal_on && address >= 0xE000) return rom_kernal[address & 0x1FFF];
 		return s->RAM[address];
 	}
 	default: return s->RAM[address]; // RAM, and the RAM hidden under I/O
@@ -138,22 +154,23 @@ void debug_capture(const machine_state* s, debug_state& out)
 	out.char_on = s->is_char_on;
 	out.cart_inserted = s->cart.enabled;
 
-	// VIC-II. The renderer reads its registers straight out of RAM, so this is
-	// the same view the picture is drawn from.
-	out.ctrl1 = s->RAM[VIC_CTRL1];
-	out.ctrl2 = s->RAM[VIC_CTRL2];
-	out.mem_ptr = s->RAM[VIC_MEMORY];
-	out.border = s->RAM[mem_border_color] & 0x0F;
-	out.background = s->RAM[mem_center_color] & 0x0F;
+	// VIC-II, from the register file the picture is drawn from.
+	const uint8_t* const vic = s->vic.regs;
+	out.ctrl1 = vic[0x11];
+	out.ctrl2 = vic[0x16];
+	out.mem_ptr = vic[0x18];
+	out.border = vic[0x20] & 0x0F;
+	out.background = vic[0x21] & 0x0F;
 	out.raster = static_cast<uint16_t>(s->vic.raster_line);
 	out.raster_compare = s->vic.raster_compare;
 	out.vic_irq_enable = s->vic.irq_enable;
 	out.vic_irq_status = s->vic.irq_status;
-	out.sprite_enable = s->RAM[0xD015];
-	out.sprite_sprite_hit = s->RAM[0xD01E];
-	out.sprite_bg_hit = s->RAM[0xD01F];
+	out.sprite_enable = vic[0x15];
+	out.sprite_sprite_hit = vic[0x1E];
+	out.sprite_bg_hit = vic[0x1F];
 
-	const int bank_num = (~s->RAM[0xDD00]) & 0x03;
+	const uint8_t port_a = static_cast<uint8_t>((s->cia2.regs[0] & s->cia2.regs[2]) | ~s->cia2.regs[2]);
+	const int bank_num = (~port_a) & 0x03;
 	out.vic_bank = static_cast<uint16_t>(bank_num * 0x4000);
 	out.screen_base = static_cast<uint16_t>(out.vic_bank + ((out.mem_ptr >> 4) & 0x0F) * 0x0400);
 	out.char_base = static_cast<uint16_t>(out.vic_bank + ((out.mem_ptr >> 1) & 0x07) * 0x0800);
@@ -205,7 +222,11 @@ void debug_capture(const machine_state* s, debug_state& out)
 			address += length > 0 ? length : 1;
 			++count;
 		}
-		if (address == s->cpu.pc && count <= kBefore) { start = candidate; break; }
+		if (address == s->cpu.pc && count <= kBefore)
+		{
+			start = candidate;
+			break;
+		}
 	}
 
 	out.disasm_count = 0;
@@ -215,10 +236,8 @@ void debug_capture(const machine_state* s, debug_state& out)
 	{
 		disasm_line& line = out.disasm[i];
 		line.address = address;
-		for (int b = 0; b < 3; b++)
-			line.bytes[b] = debug_peek(s, static_cast<uint16_t>(address + b));
-		line.length = static_cast<uint8_t>(
-			disassemble_6502(address, line.bytes, line.text, sizeof(line.text)));
+		for (int b = 0; b < 3; b++) line.bytes[b] = debug_peek(s, static_cast<uint16_t>(address + b));
+		line.length = static_cast<uint8_t>(disassemble_6502(address, line.bytes, line.text, sizeof(line.text)));
 		if (address == s->cpu.pc) out.current = i;
 		address = static_cast<uint16_t>(address + line.length);
 		out.disasm_count = i + 1;

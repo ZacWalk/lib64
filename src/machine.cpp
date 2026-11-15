@@ -1,4 +1,4 @@
-﻿// lib8bit by Zac Walker
+﻿// lib64 by Zac Walker
 //
 // Core C64 machine implementation: reset, memory banking, the memory bus,
 // CIA timers and keyboard, and the top-level exec/step orchestration that
@@ -6,10 +6,12 @@
 //
 // http://forum.arduino.cc/index.php?topic=193216.msg1793065#msg1793065
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "cpu.h"
 #include "disk.h"
@@ -33,6 +35,7 @@ namespace
 void machine_state::reset()
 {
 	std::memset(RAM, 0, RAM_SIZE);
+	std::memset(color_ram, 0, sizeof(color_ram));
 
 	// Processor port: 0x2F direction, 0x07 data => BASIC + KERNAL + I/O all
 	// visible at power-on, exactly as the C64 comes up before the kernal runs.
@@ -55,9 +58,15 @@ void machine_state::reset()
 	cia2 = cia_chip{};
 	vic = vic_chip{};
 	sid.reset();
+	// The machine is PAL; only an NTSC tune runs the chip at the NTSC clock.
+	sid.set_sampling_parameters(sid_clock_pal, sid.sample_rate());
 	sid.audio_cycle = 0;
 	std::memset(sid_regs, 0, sizeof(sid_regs));
 	sid_player = sid_player_state{}; // any reset leaves the tune front end
+	typing.clear();
+	pending_prg.clear();
+	typing_deadline = 0;
+	autostart_entry.clear();
 
 	// Reset the cartridge before reading the reset vector so an Ultimax cart can
 	// supply $FFFC/$FFFD.
@@ -84,12 +93,9 @@ void machine_state::update_memory_map()
 	const uint8_t ddr = RAM[0];
 	const uint8_t bank = static_cast<uint8_t>((RAM[1] & ddr) | (0x17 & ~ddr));
 
-	const uint32_t key = static_cast<uint32_t>(bank & 0x07)
-		| (cart.enabled ? 0x08u : 0u)
-		| (cart.exrom != 0 ? 0x10u : 0u)
-		| (cart.game != 0 ? 0x20u : 0u)
-		| (cart.has_roml() ? 0x40u : 0u)
-		| (cart.has_romh() ? 0x80u : 0u);
+	const uint32_t key = static_cast<uint32_t>(bank & 0x07) | (cart.enabled ? 0x08u : 0u) |
+	                     (cart.exrom != 0 ? 0x10u : 0u) | (cart.game != 0 ? 0x20u : 0u) |
+	                     (cart.has_roml() ? 0x40u : 0u) | (cart.has_romh() ? 0x80u : 0u);
 	if (key == memory_map_key) return;
 	memory_map_key = key;
 
@@ -112,7 +118,7 @@ void machine_state::update_memory_map()
 	}
 	else
 	{
-		std::memset(write_map + 0xD0, 0, 0x10); // RAM writes under $D000-$DFFF
+		std::memset(write_map + 0xD0, 0, 0x10);                // RAM writes under $D000-$DFFF
 		if (is_char_on) std::memset(read_map + 0xD0, 3, 0x10); // Char ROM reads
 	}
 
@@ -142,8 +148,7 @@ void machine_state::update_memory_map()
 		}
 		else if (exrom_low)
 		{
-			if (cart.has_roml() && loram && hiram)
-				std::memset(read_map + 0x80, 5, 0x20); // $8000-$9FFF ROML
+			if (cart.has_roml() && loram && hiram) std::memset(read_map + 0x80, 5, 0x20); // $8000-$9FFF ROML
 			if (cart.has_romh() && game_low && hiram)
 			{
 				is_basic_on = false;                   // ROMH replaces BASIC
@@ -179,7 +184,7 @@ uint8_t machine_state::ram_read(const uint16_t address)
 	{
 		if (address < 0xD400) return read_vic(address);
 		if (address < 0xD800) return sid_read(address & 0x1F);
-		if (address < 0xDC00) return RAM[address] & 0x0F; // Colour RAM (4-bit)
+		if (address < 0xDC00) return color_ram[address & 0x3FF] & 0x0F; // 4-bit cells
 		if (address < 0xDD00) return read_cia1(address);
 		if (address < 0xDE00) return read_cia2(address);
 		// $DE00-$DFFF I/O expansion: some cartridges bank-switch on read.
@@ -190,17 +195,16 @@ uint8_t machine_state::ram_read(const uint16_t address)
 			update_memory_map();
 			if (served) return out;
 		}
-		return RAM[address];
+		return 0xFF; // nothing drives the bus there
 	}
 
 	if (type == 5 || type == 6) // cartridge ROML / ROMH
 	{
 		uint8_t out = 0;
+		if (type == 5) cart.touch_roml(address);
 		if (cart.enabled && cart.read(address, out)) return out;
-		if (type == 6 && is_basic_on && address >= 0xA000 && address < 0xC000)
-			return rom_basic[address & 0x1FFF];
-		if (type == 6 && is_kernal_on && address >= 0xE000)
-			return rom_kernal[address & 0x1FFF];
+		if (type == 6 && is_basic_on && address >= 0xA000 && address < 0xC000) return rom_basic[address & 0x1FFF];
+		if (type == 6 && is_kernal_on && address >= 0xE000) return rom_kernal[address & 0x1FFF];
 		return RAM[address];
 	}
 
@@ -209,7 +213,11 @@ uint8_t machine_state::ram_read(const uint16_t address)
 
 void machine_state::ram_write(const uint16_t address, const uint8_t value)
 {
-	if (raw_ram) { RAM[address] = value; return; } // bare 6502 + flat RAM
+	if (raw_ram)
+	{
+		RAM[address] = value;
+		return;
+	} // bare 6502 + flat RAM
 
 	if (write_map[address >> 8] == 0) // RAM
 	{
@@ -238,18 +246,20 @@ void machine_state::ram_write(const uint16_t address, const uint8_t value)
 		return;
 	}
 
+	// clang-format off
 	if (address < 0xD400) { write_vic(address, value); return; }
 	if (address < 0xD800) { sid_write(address & 0x1F, value); return; }
-	if (address < 0xDC00) { RAM[address] = value & 0x0F; return; } // Colour RAM
+	if (address < 0xDC00) { color_ram[address & 0x3FF] = value & 0x0F; return; }
 	if (address < 0xDD00) { write_cia1(address, value); return; }
 	if (address < 0xDE00) { write_cia2(address, value); return; }
-	// $DE00-$DFFF I/O expansion: cartridge bank switching.
+	// clang-format on
+	// $DE00-$DFFF I/O expansion: cartridge bank switching. Nothing is stored
+	// there without a cartridge.
 	if (cart.enabled)
 	{
 		cart.write_io(address, value);
 		update_memory_map();
 	}
-	RAM[address] = value;
 }
 
 // ===========================================================================
@@ -259,73 +269,69 @@ void machine_state::ram_write(const uint16_t address, const uint8_t value)
 uint8_t machine_state::read_vic(const uint16_t address)
 {
 	// The VIC-II has 47 registers at $D000-$D02E and mirrors its 64-byte block
-	// every 64 bytes through $D3FF, so normalise the address to $D000-$D03F.
-	const uint16_t reg = static_cast<uint16_t>(0xD000 | (address & 0x3F));
+	// every 64 bytes through $D3FF.
+	const int reg = address & 0x3F;
 	const int32_t raster_line = vic.raster_line;
+	uint8_t* const regs = vic.regs;
 
 	switch (reg)
 	{
-	case 0xD012: // raster counter low 8 bits
+	case 0x12: // raster counter low 8 bits
 		return static_cast<uint8_t>(raster_line & 0xFF);
-	case 0xD011: // control register 1: bit 7 is raster bit 8
-		return static_cast<uint8_t>((RAM[0xD011] & 0x7F) | ((raster_line & 0x100) >> 1));
-	case 0xD016: // control register 2: bits 6-7 are unused (read as 1)
-		return static_cast<uint8_t>(RAM[0xD016] | 0xC0);
-	case 0xD018: // memory pointers: bit 0 is unused (read as 1)
-		return static_cast<uint8_t>(RAM[0xD018] | 0x01);
-	case 0xD019: // interrupt status: bits 4-6 are unused (read as 1)
+	case 0x11: // control register 1: bit 7 is raster bit 8
+		return static_cast<uint8_t>((regs[0x11] & 0x7F) | ((raster_line & 0x100) >> 1));
+	case 0x16: // control register 2: bits 6-7 are unused (read as 1)
+		return static_cast<uint8_t>(regs[0x16] | 0xC0);
+	case 0x18: // memory pointers: bit 0 is unused (read as 1)
+		return static_cast<uint8_t>(regs[0x18] | 0x01);
+	case 0x19: // interrupt status: bits 4-6 are unused (read as 1)
 		return static_cast<uint8_t>(vic.irq_status | 0x70);
-	case 0xD01A: // interrupt enable: bits 4-7 are unused (read as 1)
+	case 0x1A: // interrupt enable: bits 4-7 are unused (read as 1)
 		return static_cast<uint8_t>(vic.irq_enable | 0xF0);
-	case 0xD01E: // sprite-sprite collision (cleared on read)
+	case 0x1E: // sprite-sprite collision (cleared on read)
+	case 0x1F: // sprite-background collision (cleared on read)
 	{
-		const uint8_t v = RAM[0xD01E];
-		RAM[0xD01E] = 0;
-		return v;
-	}
-	case 0xD01F: // sprite-background collision (cleared on read)
-	{
-		const uint8_t v = RAM[0xD01F];
-		RAM[0xD01F] = 0;
+		const uint8_t v = regs[reg];
+		regs[reg] = 0;
 		return v;
 	}
 	default:
 		// Colour registers $D020-$D02E only use the low nibble; the high nibble
 		// reads back as 1. Registers $D02F-$D03F do not exist and read as $FF.
-		if (reg >= 0xD020 && reg <= 0xD02E) return static_cast<uint8_t>(RAM[reg] | 0xF0);
-		if (reg >= 0xD02F) return 0xFF;
-		return RAM[reg];
+		if (reg >= 0x20 && reg <= 0x2E) return static_cast<uint8_t>(regs[reg] | 0xF0);
+		if (reg >= 0x2F) return 0xFF;
+		return regs[reg];
 	}
 }
 
 void machine_state::write_vic(const uint16_t address, const uint8_t value)
 {
-	const uint16_t reg = static_cast<uint16_t>(0xD000 | (address & 0x3F));
+	const int reg = address & 0x3F;
+	uint8_t* const regs = vic.regs;
 	switch (reg)
 	{
-	case 0xD011:
-		RAM[reg] = value;
-		vic.raster_compare = static_cast<uint16_t>((RAM[0xD012] & 0xFF) | ((value & 0x80) << 1));
+	case 0x11:
+		regs[reg] = value;
+		vic.raster_compare = static_cast<uint16_t>(regs[0x12] | ((value & 0x80) << 1));
 		return;
-	case 0xD012:
-		RAM[reg] = value;
-		vic.raster_compare = static_cast<uint16_t>(((RAM[0xD011] & 0x80) << 1) | value);
+	case 0x12:
+		regs[reg] = value;
+		vic.raster_compare = static_cast<uint16_t>(((regs[0x11] & 0x80) << 1) | value);
 		return;
-	case 0xD019:
+	case 0x19:
 		// Acknowledge interrupts: writing 1s clears the matching status bits.
 		vic.irq_status &= ~(value & 0x0F);
 		update_vic_irq();
 		return;
-	case 0xD01A:
+	case 0x1A:
 		vic.irq_enable = value & 0x0F;
-		RAM[reg] = value;
+		regs[reg] = value;
 		update_vic_irq();
 		return;
-	case 0xD01E: // collision registers are read-only
-	case 0xD01F:
-		return;
+	case 0x1E: // collision registers are read-only
+	case 0x1F: return;
 	default:
-		RAM[reg] = value;
+		if (reg < 0x2F) regs[reg] = value;
 		return;
 	}
 }
@@ -337,19 +343,20 @@ void machine_state::write_vic(const uint16_t address, const uint8_t value)
 uint8_t machine_state::read_cia1(const uint16_t address)
 {
 	// The CIA has 16 registers mirrored every 16 bytes through its $DC00-$DCFF page.
-	const uint16_t reg = static_cast<uint16_t>(0xDC00 | (address & 0x0F));
+	const int reg = address & 0x0F;
+	const uint8_t* const regs = cia1.regs;
 
-	switch (reg & 0x0F)
+	switch (reg)
 	{
 	case 0x00: // Port A - joystick 2 + keyboard rows when columns are driven
 	{
 		// Pins configured as inputs float high; only output bits read back the latch.
-		const uint8_t ddra = RAM[0xDC02];
-		uint8_t result = static_cast<uint8_t>(((RAM[0xDC00] & ddra) | ~ddra) & joystick2);
+		const uint8_t ddra = regs[2];
+		uint8_t result = static_cast<uint8_t>(((regs[0] & ddra) | ~ddra) & joystick2);
 		// Reverse scan: a game driving columns low on Port B (DDRB output) and
 		// reading Port A sees a row bit pulled low where a key is pressed.
-		const uint8_t ddrb = RAM[0xDC03];
-		const uint8_t col_out = RAM[0xDC01];
+		const uint8_t ddrb = regs[3];
+		const uint8_t col_out = regs[1];
 		for (int c = 0; c < 8; ++c)
 		{
 			if ((ddrb & (1u << c)) && (col_out & (1u << c)) == 0)
@@ -360,20 +367,23 @@ uint8_t machine_state::read_cia1(const uint16_t address)
 	}
 	case 0x01: // Port B - joystick 1 + keyboard columns for the selected rows
 	{
-		const uint8_t ddrb = RAM[0xDC03];
-		uint8_t result = static_cast<uint8_t>(((RAM[0xDC01] & ddrb) | ~ddrb) & joystick1);
+		const uint8_t ddrb = regs[3];
+		uint8_t result = static_cast<uint8_t>(((regs[1] & ddrb) | ~ddrb) & joystick1);
 		// Rows are the Port A outputs (DDRA bit set, latch bit low = row selected).
-		const uint8_t ddra = RAM[0xDC02];
-		const uint8_t row_out = RAM[0xDC00];
+		const uint8_t ddra = regs[2];
+		const uint8_t row_out = regs[0];
 		for (int r = 0; r < 8; ++r)
-			if ((ddra & (1u << r)) && (row_out & (1u << r)) == 0)
-				result &= key_matrix[r];
+			if ((ddra & (1u << r)) && (row_out & (1u << r)) == 0) result &= key_matrix[r];
 		return result;
 	}
 	case 0x04: return static_cast<uint8_t>(cia1.timer_a_counter & 0xFF);
 	case 0x05: return static_cast<uint8_t>((cia1.timer_a_counter >> 8) & 0xFF);
 	case 0x06: return static_cast<uint8_t>(cia1.timer_b_counter & 0xFF);
 	case 0x07: return static_cast<uint8_t>((cia1.timer_b_counter >> 8) & 0xFF);
+	case 0x08:
+	case 0x09:
+	case 0x0A:
+	case 0x0B: return read_tod(cia1, reg - 8);
 	case 0x0D: // ICR - reading returns and clears the flags
 	{
 		const uint8_t v = cia1.icr_data;
@@ -383,30 +393,30 @@ uint8_t machine_state::read_cia1(const uint16_t address)
 	}
 	case 0x0E: return cia1.cra;
 	case 0x0F: return cia1.crb;
-	default: return RAM[reg];
+	default: return regs[reg];
 	}
 }
 
 void machine_state::write_cia1(const uint16_t address, const uint8_t value)
 {
-	const uint16_t reg = static_cast<uint16_t>(0xDC00 | (address & 0x0F));
+	const int reg = address & 0x0F;
 
-	switch (reg & 0x0F)
+	switch (reg)
 	{
-	case 0x04:
-		cia1.timer_a_latch = static_cast<uint16_t>((cia1.timer_a_latch & 0xFF00) | value);
-		break;
+	case 0x04: cia1.timer_a_latch = static_cast<uint16_t>((cia1.timer_a_latch & 0xFF00) | value); break;
 	case 0x05:
 		cia1.timer_a_latch = static_cast<uint16_t>((cia1.timer_a_latch & 0x00FF) | (value << 8));
 		if (!cia1.timer_a_running) cia1.timer_a_counter = cia1.timer_a_latch;
 		break;
-	case 0x06:
-		cia1.timer_b_latch = static_cast<uint16_t>((cia1.timer_b_latch & 0xFF00) | value);
-		break;
+	case 0x06: cia1.timer_b_latch = static_cast<uint16_t>((cia1.timer_b_latch & 0xFF00) | value); break;
 	case 0x07:
 		cia1.timer_b_latch = static_cast<uint16_t>((cia1.timer_b_latch & 0x00FF) | (value << 8));
 		if (!cia1.timer_b_running) cia1.timer_b_counter = cia1.timer_b_latch;
 		break;
+	case 0x08:
+	case 0x09:
+	case 0x0A:
+	case 0x0B: write_tod(cia1, reg - 8, value); break;
 	case 0x0D:
 		if (value & 0x80) cia1.icr_mask |= (value & 0x1F);
 		else cia1.icr_mask &= ~(value & 0x1F);
@@ -426,9 +436,7 @@ void machine_state::write_cia1(const uint16_t address, const uint8_t value)
 		cia1.timer_b_running = (value & 0x01) != 0;
 		if (value & 0x10) cia1.timer_b_counter = cia1.timer_b_latch;
 		break;
-	default:
-		RAM[reg] = value;
-		break;
+	default: cia1.regs[reg] = value; break;
 	}
 }
 
@@ -438,17 +446,22 @@ void machine_state::write_cia1(const uint16_t address, const uint8_t value)
 
 uint8_t machine_state::read_cia2(const uint16_t address)
 {
-	const uint16_t reg = static_cast<uint16_t>(0xDD00 | (address & 0x0F));
+	const int reg = address & 0x0F;
+	const uint8_t* const regs = cia2.regs;
 
-	switch (reg & 0x0F)
+	switch (reg)
 	{
 	case 0x00:
 		// Port A drives the VIC bank on bits 0-1; lines set to input float high.
-		return static_cast<uint8_t>((RAM[reg] & RAM[0xDD02]) | (0xFF & ~RAM[0xDD02]));
+		return static_cast<uint8_t>((regs[0] & regs[2]) | (0xFF & ~regs[2]));
 	case 0x04: return static_cast<uint8_t>(cia2.timer_a_counter & 0xFF);
 	case 0x05: return static_cast<uint8_t>((cia2.timer_a_counter >> 8) & 0xFF);
 	case 0x06: return static_cast<uint8_t>(cia2.timer_b_counter & 0xFF);
 	case 0x07: return static_cast<uint8_t>((cia2.timer_b_counter >> 8) & 0xFF);
+	case 0x08:
+	case 0x09:
+	case 0x0A:
+	case 0x0B: return read_tod(cia2, reg - 8);
 	case 0x0D:
 	{
 		const uint8_t v = cia2.icr_data;
@@ -458,33 +471,30 @@ uint8_t machine_state::read_cia2(const uint16_t address)
 	}
 	case 0x0E: return cia2.cra;
 	case 0x0F: return cia2.crb;
-	default: return RAM[reg];
+	default: return regs[reg];
 	}
 }
 
 void machine_state::write_cia2(const uint16_t address, const uint8_t value)
 {
-	const uint16_t reg = static_cast<uint16_t>(0xDD00 | (address & 0x0F));
+	const int reg = address & 0x0F;
 
-	switch (reg & 0x0F)
+	switch (reg)
 	{
-	case 0x00:
-		RAM[reg] = value; // VIC bank select (bits 0-1)
-		break;
-	case 0x04:
-		cia2.timer_a_latch = static_cast<uint16_t>((cia2.timer_a_latch & 0xFF00) | value);
-		break;
+	case 0x04: cia2.timer_a_latch = static_cast<uint16_t>((cia2.timer_a_latch & 0xFF00) | value); break;
 	case 0x05:
 		cia2.timer_a_latch = static_cast<uint16_t>((cia2.timer_a_latch & 0x00FF) | (value << 8));
 		if (!cia2.timer_a_running) cia2.timer_a_counter = cia2.timer_a_latch;
 		break;
-	case 0x06:
-		cia2.timer_b_latch = static_cast<uint16_t>((cia2.timer_b_latch & 0xFF00) | value);
-		break;
+	case 0x06: cia2.timer_b_latch = static_cast<uint16_t>((cia2.timer_b_latch & 0xFF00) | value); break;
 	case 0x07:
 		cia2.timer_b_latch = static_cast<uint16_t>((cia2.timer_b_latch & 0x00FF) | (value << 8));
 		if (!cia2.timer_b_running) cia2.timer_b_counter = cia2.timer_b_latch;
 		break;
+	case 0x08:
+	case 0x09:
+	case 0x0A:
+	case 0x0B: write_tod(cia2, reg - 8, value); break;
 	case 0x0D:
 		if (value & 0x80) cia2.icr_mask |= (value & 0x1F);
 		else cia2.icr_mask &= ~(value & 0x1F);
@@ -503,8 +513,104 @@ void machine_state::write_cia2(const uint16_t address, const uint8_t value)
 		if (value & 0x10) cia2.timer_b_counter = cia2.timer_b_latch;
 		break;
 	default:
-		RAM[reg] = value;
+		cia2.regs[reg] = value; // port A bits 0-1 select the VIC bank
 		break;
+	}
+}
+
+// ===========================================================================
+// CIA time-of-day clocks
+// ===========================================================================
+
+namespace
+{
+	// PAL mains, 50 Hz, in CPU cycles.
+	constexpr int32_t TOD_TICK_CYCLES = 985248 / 50;
+
+	uint8_t bcd_increment(const uint8_t v)
+	{
+		return (v & 0x0F) == 9 ? static_cast<uint8_t>((v & 0xF0) + 0x10) : static_cast<uint8_t>(v + 1);
+	}
+}
+
+uint8_t machine_state::read_tod(cia_chip& c, const int reg)
+{
+	// Reading the hours freezes the read-out, so the four registers read as one
+	// time; reading the tenths lets it run on.
+	if (reg == 3 && !c.tod_latched)
+	{
+		std::memcpy(c.tod_latch, c.tod, sizeof(c.tod));
+		c.tod_latched = true;
+	}
+	const uint8_t value = c.tod_latched ? c.tod_latch[reg] : c.tod[reg];
+	if (reg == 0) c.tod_latched = false;
+	return value;
+}
+
+void machine_state::write_tod(cia_chip& c, const int reg, uint8_t value)
+{
+	constexpr uint8_t masks[4] = {0x0F, 0x7F, 0x7F, 0x9F};
+	value &= masks[reg];
+
+	// CRB bit 7 points writes at the alarm rather than the clock.
+	if (c.crb & 0x80)
+	{
+		c.tod_alarm[reg] = value;
+		return;
+	}
+
+	c.tod[reg] = value;
+	if (reg == 3) c.tod_running = false;
+	if (reg == 0)
+	{
+		c.tod_running = true;
+		c.tod_ticks = 0;
+	}
+}
+
+void machine_state::tick_tod(cia_chip& c, const int32_t cycles, const bool is_cia2)
+{
+	if (!c.tod_running) return;
+
+	c.tod_cycles += cycles;
+	while (c.tod_cycles >= TOD_TICK_CYCLES)
+	{
+		c.tod_cycles -= TOD_TICK_CYCLES;
+		// CRA bit 7 says the mains is 50 Hz, so five ticks make a tenth; clear,
+		// the chip expects 60 Hz and counts six.
+		if (++c.tod_ticks < ((c.cra & 0x80) ? 5 : 6)) continue;
+		c.tod_ticks = 0;
+
+		c.tod[0] = static_cast<uint8_t>((c.tod[0] + 1) % 10);
+		if (c.tod[0] == 0)
+		{
+			c.tod[1] = bcd_increment(c.tod[1]);
+			if (c.tod[1] == 0x60)
+			{
+				c.tod[1] = 0;
+				c.tod[2] = bcd_increment(c.tod[2]);
+				if (c.tod[2] == 0x60)
+				{
+					c.tod[2] = 0;
+					const uint8_t pm = c.tod[3] & 0x80;
+					const uint8_t hours = c.tod[3] & 0x1F;
+					if (hours == 0x11) c.tod[3] = static_cast<uint8_t>(0x12 | (pm ^ 0x80));
+					else if (hours == 0x12) c.tod[3] = static_cast<uint8_t>(0x01 | pm);
+					else c.tod[3] = static_cast<uint8_t>(bcd_increment(hours) | pm);
+				}
+			}
+		}
+
+		if (std::memcmp(c.tod, c.tod_alarm, sizeof(c.tod)) == 0)
+		{
+			c.icr_data |= 0x04;
+			if (c.icr_mask & 0x04)
+			{
+				c.icr_data |= 0x80;
+				if (is_cia2) update_nmi();
+				else update_irq_line();
+			}
+		}
 	}
 }
 
@@ -530,7 +636,7 @@ void machine_state::update_vic_irq()
 	// $D019 bit 7 is set while any latched source is also enabled in $D01A.
 	if (vic.irq_status & vic.irq_enable & 0x0F) vic.irq_status |= 0x80;
 	else vic.irq_status &= 0x7F;
-	RAM[0xD019] = vic.irq_status;
+	vic.regs[0x19] = vic.irq_status;
 	update_irq_line();
 }
 
@@ -565,13 +671,15 @@ void machine_state::tick_cia(cia_chip& c, const int32_t cycles, const bool is_ci
 		if (enabled)
 		{
 			c.icr_data |= 0x80;
-			if (is_cia2) update_nmi(); else update_irq_line();
+			if (is_cia2) update_nmi();
+			else update_irq_line();
 		}
 	};
 
 	int32_t timer_a_underflows = 0;
 
-	if (c.timer_a_running)
+	// CRA bit 5 counts transitions on the CNT pin, which nothing on a C64 drives.
+	if (c.timer_a_running && (c.cra & 0x20) == 0)
 	{
 		c.timer_a_counter -= cycles;
 		// A single call can span several periods when the latch is smaller than the
@@ -634,41 +742,88 @@ void machine_state::tick_cia(cia_chip& c, const int32_t cycles, const bool is_ci
 		}
 		if (underflowed) raise(0x02, c.timer_b_int_enabled);
 	}
+
+	tick_tod(c, cycles, is_cia2);
 }
 
-void machine_state::tick_vic(const int32_t cycles)
+int32_t machine_state::tick_vic(int32_t cycles)
 {
-	vic.line_cycle += cycles;
-	while (vic.line_cycle >= CYCLES_PER_RASTER_LINE)
+	// On a bad line the VIC reads the next character row in cycles 15-54 and
+	// the CPU waits; DEN set on raster $30 is what gives a frame bad lines.
+	const auto bad_line = [this]
 	{
-		vic.line_cycle -= CYCLES_PER_RASTER_LINE;
-		if (++vic.raster_line >= RASTER_LINES_PER_FRAME) vic.raster_line = 0;
-	}
+		const int32_t line = vic.raster_line;
+		return vic.bad_lines && line >= 0x30 && line <= 0xF7 && (line & 7) == (vic.regs[0x11] & 7);
+	};
 
-	const int32_t current_line = vic.raster_line;
-	if (current_line != vic.last_raster_line)
+	// Each sprite shown on a line costs the CPU two cycles of fetches, and each
+	// of the two groups the VIC fetches them in (0-2 and 3-7) three more while
+	// the CPU is made to stop.
+	const auto sprite_cycles = [this]
 	{
-		// Render the line we just finished so a raster-IRQ handler has had the
-		// whole line to change VIC registers before we capture them.
-		if (render_enabled && vic.last_raster_line >= 0)
-			vic_render_scanline(this, vic.last_raster_line);
+		const uint8_t enabled = vic.regs[0x15];
+		if (enabled == 0) return 0;
+		int32_t total = 0;
+		int group_low = 0, group_high = 0;
+		for (int s = 0; s < 8; ++s)
+		{
+			if ((enabled & (1 << s)) == 0) continue;
+			const int32_t row = vic.raster_line - (vic.regs[1 + s * 2] + 1);
+			const int32_t height = (vic.regs[0x17] & (1 << s)) ? 42 : 21;
+			if (row < 0 || row >= height) continue;
+			total += 2;
+			if (s < 3) group_low = 3;
+			else group_high = 3;
+		}
+		return total + group_low + group_high;
+	};
 
-		if (current_line == vic.raster_compare)
+	int32_t stolen = 0;
+	while (cycles > 0)
+	{
+		const int32_t from = vic.line_cycle;
+		const int32_t step = std::min(cycles, CYCLES_PER_RASTER_LINE - from);
+		vic.line_cycle += step;
+		cycles -= step;
+
+		if (vic.raster_line == 0x30 && (vic.regs[0x11] & 0x10)) vic.bad_lines = true;
+		if (from < 15 && vic.line_cycle >= 15 && bad_line()) stolen += 40;
+		if (vic.line_cycle < CYCLES_PER_RASTER_LINE) continue;
+
+		// Render the line just finished, so a raster-IRQ handler has had the
+		// whole line to change VIC registers before they are sampled.
+		vic.line_cycle = 0;
+		if (render_enabled) vic_render_scanline(this, vic.raster_line);
+		vic.last_raster_line = vic.raster_line;
+		if (++vic.raster_line >= RASTER_LINES_PER_FRAME)
+		{
+			vic.raster_line = 0;
+			vic.bad_lines = false;
+		}
+
+		if (vic.raster_line == vic.raster_compare)
 		{
 			vic.irq_status |= 0x01;
 			update_vic_irq();
 		}
-		vic.last_raster_line = current_line;
+		stolen += sprite_cycles();
+	}
+	return stolen;
+}
+
+void machine_state::step_hardware(int32_t cycles)
+{
+	// The cycles the VIC takes the bus for pass for every chip but the CPU,
+	// which waits through them.
+	while (cycles > 0)
+	{
+		tick_cia(cia1, cycles, false);
+		tick_cia(cia2, cycles, true);
+		const int32_t stolen = tick_vic(cycles);
+		clock_ticks += stolen;
+		cycles = stolen;
 	}
 }
-
-void machine_state::step_hardware(const int32_t cycles)
-{
-	tick_cia(cia1, cycles, false);
-	tick_cia(cia2, cycles, true);
-	tick_vic(cycles);
-}
-
 
 uint8_t machine::convert_char(const wchar_t c)
 {
@@ -695,16 +850,11 @@ void machine::add_key(const machine_key key)
 {
 	switch (key)
 	{
-	case machine_key::back: add_char(20);
-		break;
-	case machine_key::up: add_char(145);
-		break;
-	case machine_key::down: add_char(17);
-		break;
-	case machine_key::left: add_char(157);
-		break;
-	case machine_key::right: add_char(29);
-		break;
+	case machine_key::back: add_char(20); break;
+	case machine_key::up: add_char(145); break;
+	case machine_key::down: add_char(17); break;
+	case machine_key::left: add_char(157); break;
+	case machine_key::right: add_char(29); break;
 	}
 }
 
@@ -722,9 +872,9 @@ bool machine::video_is_invalid() const
 {
 	auto* snap = _state->video_snapshot;
 	const auto* screen = _state->RAM + text_video_mem_offset;
-	const auto* colour = _state->RAM + mem_text_color;
-	const auto border = _state->RAM[mem_border_color];
-	const auto background = _state->RAM[mem_center_color];
+	const auto* colour = _state->color_ram;
+	const auto border = _state->vic.regs[mem_border_color & 0x3F];
+	const auto background = _state->vic.regs[mem_center_color & 0x3F];
 
 	bool changed = false;
 	if (std::memcmp(snap, screen, 1000) != 0)
@@ -788,8 +938,7 @@ bool machine::load_prg(const uint8_t* data, const size_t size)
 {
 	if (!is_prg(data, size)) return false;
 
-	const uint16_t load_addr = static_cast<uint16_t>(data[0]) |
-		(static_cast<uint16_t>(data[1]) << 8);
+	const uint16_t load_addr = static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
 	const size_t payload = size - 2;
 
 	std::memcpy(_state->RAM + load_addr, data + 2, payload);
@@ -811,8 +960,7 @@ bool machine::load_prg(const uint8_t* data, const size_t size)
 
 		// Clear the keyboard buffer and inject RUN<RETURN>.
 		constexpr char run[] = {'R', 'U', 'N', 13};
-		for (int i = 0; i < 4; i++)
-			_state->RAM[mem_keyboard_buffer + i] = static_cast<uint8_t>(run[i]);
+		for (int i = 0; i < 4; i++) _state->RAM[mem_keyboard_buffer + i] = static_cast<uint8_t>(run[i]);
 		_state->RAM[mem_length_of_keyboard_buffer] = 4;
 	}
 
@@ -829,8 +977,8 @@ const uint32_t* machine::framebuffer() const
 	return _state->framebuffer;
 }
 
-void machine::set_joystick(const int port, const bool up, const bool down,
-                           const bool left, const bool right, const bool fire)
+void machine::set_joystick(const int port, const bool up, const bool down, const bool left, const bool right,
+                           const bool fire)
 {
 	uint8_t value = 0xFF; // bits active low
 	if (up) value &= ~0x01;
@@ -942,8 +1090,8 @@ void machine::eject_crt()
 namespace
 {
 	// Zero page, as SETNAM/SETLFS and the LOAD routine leave it.
-	constexpr uint16_t ZP_STATUS = 0x90;    // ST, the serial status byte
-	constexpr uint16_t ZP_VERIFY = 0x93;    // 0 = load, non-zero = verify
+	constexpr uint16_t ZP_STATUS = 0x90; // ST, the serial status byte
+	constexpr uint16_t ZP_VERIFY = 0x93; // 0 = load, non-zero = verify
 	constexpr uint16_t ZP_NAME_LEN = 0xB7;
 	constexpr uint16_t ZP_SECONDARY = 0xB9;
 	constexpr uint16_t ZP_DEVICE = 0xBA;
@@ -984,7 +1132,10 @@ namespace
 		{
 			const size_t digits = entry.blocks >= 100 ? 3 : entry.blocks >= 10 ? 2 : 1;
 			std::string text(4 - digits, ' ');
-			text += '"' + pad_to(entry.filename, 16) + '"';
+			text += '"';
+			text.append(entry.raw_name.begin(), entry.raw_name.end());
+			text += '"';
+			text.append(16 - std::min<size_t>(16, entry.raw_name.size()), ' ');
 			text += entry.closed ? ' ' : '*';
 			text += entry.type;
 			if (entry.locked) text += '<';
@@ -998,19 +1149,37 @@ namespace
 	}
 
 	// "@0:NAME,P" and friends: strip the drive prefix and the type/mode suffix.
+	// The bytes stay PETSCII, as the drive compares them.
 	std::string load_file_name(const machine_state* s)
 	{
-		uint8_t raw[256];
 		const uint8_t length = s->RAM[ZP_NAME_LEN];
 		const auto pointer = static_cast<uint16_t>(s->RAM[ZP_NAME_PTR] | s->RAM[ZP_NAME_PTR + 1] << 8);
-		for (int i = 0; i < length; ++i) raw[i] = s->RAM[static_cast<uint16_t>(pointer + i)];
+		std::string name;
+		for (int i = 0; i < length; ++i) name.push_back(static_cast<char>(s->RAM[static_cast<uint16_t>(pointer + i)]));
 
-		auto name = petscii_to_ascii(raw, length);
 		const auto colon = name.find(':');
 		if (colon != std::string::npos) name.erase(0, colon + 1);
 		const auto comma = name.find(',');
 		if (comma != std::string::npos) name.erase(comma);
 		return name;
+	}
+
+	// The name autostart_disk types between LOAD's quotes for one a directory
+	// stores. Between quotes the editor stores what it is given as screen codes
+	// and BASIC reads back the PETSCII each one stands for, so only the bytes that
+	// survive the trip, and that the drive does not take as punctuation, are typed
+	// as themselves; the rest are typed as '?', which a drive matches with any one.
+	std::string typed_load_name(const uint8_t* name, const size_t length)
+	{
+		std::string typed;
+		for (size_t i = 0; i < length; ++i)
+		{
+			const uint8_t c = name[i];
+			const bool typeable = ((c >= 0x20 && c <= 0x5F) || (c >= 0xA1 && c <= 0xDF)) && c != '"' && c != ',' &&
+			                      c != ':';
+			typed.push_back(static_cast<char>(typeable ? c : '?'));
+		}
+		return typed;
 	}
 }
 
@@ -1028,7 +1197,15 @@ bool machine_state::kernal_load()
 	std::vector<uint8_t> prg;
 	bool found = false;
 
-	if (name.starts_with("$"))
+	if (!autostart_entry.empty() && name == typed_load_name(autostart_entry.data(), autostart_entry.size()))
+	{
+		// The LOAD autostart_disk typed reads the entry it was typed for, where a
+		// drive would take the typed name as a pattern another file may match
+		// first, or a leading '$' as the directory.
+		found = read_disk_file_entry(disk.data(), disk.size(), autostart_entry.data(), autostart_entry.size(), prg);
+		autostart_entry.clear();
+	}
+	else if (name.starts_with("$"))
 	{
 		if (disk_directory dir; read_disk_directory(disk.data(), disk.size(), dir))
 		{
@@ -1038,7 +1215,8 @@ bool machine_state::kernal_load()
 	}
 	else
 	{
-		found = read_disk_file(disk.data(), disk.size(), name, prg);
+		found = read_disk_file_petscii(disk.data(), disk.size(), reinterpret_cast<const uint8_t*>(name.data()),
+		                               name.size(), prg);
 	}
 
 	// Return through the RTS that the caller of LOAD is waiting on either way.
@@ -1061,13 +1239,12 @@ bool machine_state::kernal_load()
 	// wins over the one stored in the file.
 	const auto file_addr = static_cast<uint16_t>(prg[0] | prg[1] << 8);
 	const auto load_addr = RAM[ZP_SECONDARY] != 0
-		                       ? file_addr
-		                       : static_cast<uint16_t>(RAM[ZP_LOAD_ADDR] | RAM[ZP_LOAD_ADDR + 1] << 8);
+	                           ? file_addr
+	                           : static_cast<uint16_t>(RAM[ZP_LOAD_ADDR] | RAM[ZP_LOAD_ADDR + 1] << 8);
 
 	// Write straight to RAM: a load can never be diverted into the I/O area.
 	const size_t payload = prg.size() - 2;
-	for (size_t i = 0; i < payload; ++i)
-		RAM[static_cast<uint16_t>(load_addr + i)] = prg[i + 2];
+	for (size_t i = 0; i < payload; ++i) RAM[static_cast<uint16_t>(load_addr + i)] = prg[i + 2];
 	update_memory_map(); // the program may have loaded over $00/$01
 
 	const auto end = static_cast<uint16_t>(load_addr + payload);
@@ -1085,17 +1262,148 @@ bool machine::insert_disk(const uint8_t* data, const size_t size)
 {
 	if (disk_directory probe; !data || !read_disk_directory(data, size, probe)) return false;
 	_state->disk.assign(data, data + size);
+	_state->autostart_entry.clear();
 	return true;
 }
 
 void machine::eject_disk()
 {
 	_state->disk.clear();
+	_state->autostart_entry.clear();
 }
 
 bool machine::has_disk() const
 {
 	return !_state->disk.empty();
+}
+
+// ===========================================================================
+// Autostart: what a user types to start a program, typed for them
+// ===========================================================================
+
+namespace
+{
+	constexpr uint16_t ZP_KEYS_WAITING = 0xC6;
+	constexpr uint16_t KEYBOARD_BUFFER = 0x0277;
+	constexpr int KEYBOARD_BUFFER_SIZE = 10;
+	constexpr uint16_t BASIC_START = 0x0801;
+	// Long enough for the KERNAL's cold start; the autostart is abandoned after.
+	constexpr int64_t BOOT_CYCLES = 10 * 985248;
+	// How long typed text waits for the editor once it has taken a line.
+	constexpr int64_t TYPING_CYCLES = 5 * 985248;
+
+	void append(std::vector<uint8_t>& out, const std::string_view text)
+	{
+		for (const char c : text) out.push_back(static_cast<uint8_t>(c));
+	}
+
+	// RUN for a program that loads over BASIC's start, SYS to its address for one
+	// that loads above it.
+	void append_start_command(std::vector<uint8_t>& out, const uint16_t load, const size_t length)
+	{
+		if (load > BASIC_START) append(out, "SYS" + std::to_string(load));
+		else if (load + length > BASIC_START) append(out, "RUN");
+		else return; // under BASIC: a loader that starts itself, or data
+		out.push_back(0x0D);
+	}
+
+	// A .p00 is a 26-byte "C64File" header in front of a .prg.
+	std::pair<const uint8_t*, size_t> strip_p00(const uint8_t* data, const size_t size)
+	{
+		constexpr size_t header = 26;
+		if (data && size > header + 2 && std::memcmp(data, "C64File", 7) == 0) return {data + header, size - header};
+		return {data, size};
+	}
+}
+
+void machine_state::editor_waiting()
+{
+	if (!pending_prg.empty())
+	{
+		// Placed as LOAD"",8,1 places it, with BASIC's pointers set for a program
+		// at its start, so RUN finds it and its variables start after it.
+		const auto load = static_cast<uint16_t>(pending_prg[0] | pending_prg[1] << 8);
+		const size_t length = pending_prg.size() - 2;
+		std::memcpy(RAM + load, pending_prg.data() + 2, length);
+		update_memory_map();
+		if (load == BASIC_START)
+		{
+			const auto end = static_cast<uint16_t>(load + length);
+			for (const int pointer : {0x2D, 0x2F, 0x31})
+			{
+				RAM[pointer] = end & 0xFF;
+				RAM[pointer + 1] = static_cast<uint8_t>(end >> 8);
+			}
+		}
+		append_start_command(typing, load, length);
+		pending_prg.clear();
+		typing_deadline = clock_ticks + TYPING_CYCLES;
+	}
+
+	if (typing.empty() || RAM[ZP_KEYS_WAITING] != 0) return;
+	if (clock_ticks > typing_deadline)
+	{
+		typing.clear();
+		return;
+	}
+
+	// One line at a time: the rest waits for the editor to ask again, after the
+	// line has run.
+	size_t count = 0;
+	while (count < typing.size() && count < KEYBOARD_BUFFER_SIZE)
+		if (typing[count++] == 0x0D) break;
+	std::memcpy(RAM + KEYBOARD_BUFFER, typing.data(), count);
+	RAM[ZP_KEYS_WAITING] = static_cast<uint8_t>(count);
+	typing.erase(typing.begin(), typing.begin() + static_cast<std::ptrdiff_t>(count));
+	typing_deadline = clock_ticks + TYPING_CYCLES;
+}
+
+void machine::type_text(const uint8_t* petscii, const size_t length)
+{
+	if (!petscii || length == 0) return;
+	for (size_t i = 0; i < length; ++i) _state->typing.push_back(petscii[i]);
+	_state->typing_deadline = std::max(_state->typing_deadline, _state->clock_ticks + TYPING_CYCLES);
+}
+
+bool machine::autostart_disk(const uint8_t* image, const size_t size, const uint8_t* name, const size_t name_length)
+{
+	if (!name || name_length == 0) return false;
+
+	// A name an entry has, exactly as the directory stores it, starts that entry;
+	// any other is a pattern, as LOAD takes one.
+	std::vector<uint8_t> file;
+	const bool entry = read_disk_file_entry(image, size, name, name_length, file);
+	if (!entry && !read_disk_file_petscii(image, size, name, name_length, file)) return false;
+	if (file.size() < 3 || !insert_disk(image, size)) return false;
+
+	reset();
+	if (entry) _state->autostart_entry.assign(name, name + name_length);
+
+	auto& typing = _state->typing;
+	append(typing, "LOAD\"");
+	append(typing, typed_load_name(name, name_length));
+	append(typing, "\",8,1");
+	typing.push_back(0x0D);
+	append_start_command(typing, static_cast<uint16_t>(file[0] | file[1] << 8), file.size() - 2);
+	_state->typing_deadline = _state->clock_ticks + BOOT_CYCLES;
+	return true;
+}
+
+bool machine::autostart_prg(const uint8_t* data, const size_t size)
+{
+	const auto [program, length] = strip_p00(data, size);
+	if (!is_prg(program, length)) return false;
+
+	reset();
+	_state->pending_prg.assign(program, program + length);
+	_state->typing_deadline = _state->clock_ticks + BOOT_CYCLES;
+	return true;
+}
+
+bool machine::autostarting() const
+{
+	const bool pending = !_state->pending_prg.empty() || !_state->typing.empty();
+	return pending && _state->clock_ticks <= _state->typing_deadline;
 }
 
 void machine::set_audio_enabled(const bool enabled)
@@ -1109,6 +1417,16 @@ void machine::set_audio_enabled(const bool enabled)
 void machine::set_sid_model(const sid_model model)
 {
 	_state->sid.set_chip_model(model);
+}
+
+void machine::set_audio_sample_rate(const uint32_t hz)
+{
+	_state->sid.set_sampling_parameters(_state->sid.clock_rate(), hz);
+}
+
+uint32_t machine::audio_sample_rate() const
+{
+	return static_cast<uint32_t>(_state->sid.sample_rate());
 }
 
 int machine::generate_audio(int16_t* buffer, const int max_samples)
@@ -1155,11 +1473,14 @@ namespace
 	constexpr uint16_t SID_IRQ_FULL = 0x0360;    // full handler (saves its own regs)
 	constexpr uint16_t SID_DRIVER = 0x0390;      // main driver
 
-	uint16_t sid_be16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
+	uint16_t sid_be16(const uint8_t* p)
+	{
+		return static_cast<uint16_t>((p[0] << 8) | p[1]);
+	}
 	uint32_t sid_be32(const uint8_t* p)
 	{
 		return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-			(static_cast<uint32_t>(p[2]) << 8) | p[3];
+		       (static_cast<uint32_t>(p[2]) << 8) | p[3];
 	}
 
 	// Select the $0001 memory configuration a routine at `addr` needs so that the
@@ -1271,13 +1592,13 @@ namespace
 	// survives a tune that programs VIC registers of its own.
 	void sid_player_setup_video(machine_state& s)
 	{
-		s.RAM[0xD011] = 0x1B;
-		s.RAM[0xD016] = 0x08;
-		s.RAM[0xD018] = static_cast<uint8_t>(((s.sid_player.screen_base >> 10) << 4) | 0x04);
-		s.RAM[0xD020] = 0;
-		s.RAM[0xD021] = 0;
-		s.RAM[0xDD00] = 0x03; // VIC bank 0
-		s.RAM[0xDD02] = 0x3F;
+		s.vic.regs[0x11] = 0x1B;
+		s.vic.regs[0x16] = 0x08;
+		s.vic.regs[0x18] = static_cast<uint8_t>(((s.sid_player.screen_base >> 10) << 4) | 0x04);
+		s.vic.regs[0x20] = 0;
+		s.vic.regs[0x21] = 0;
+		s.cia2.regs[0] = 0x03; // VIC bank 0
+		s.cia2.regs[2] = 0x3F;
 	}
 
 	uint8_t sid_screen_code(char c)
@@ -1296,23 +1617,24 @@ namespace
 	struct sid_screen
 	{
 		uint8_t* ram;
+		uint8_t* colour;
 		uint16_t base;
 
-		void put(int x, int y, uint8_t code, uint8_t colour) const
+		void put(int x, int y, uint8_t code, uint8_t colour_index) const
 		{
 			if (x < 0 || x >= 40 || y < 0 || y >= 25) return;
 			const int i = y * 40 + x;
 			ram[base + i] = code;
-			ram[mem_text_color + i] = colour;
+			colour[i] = colour_index;
 		}
 
-		void text(int x, int y, const char* s, uint8_t colour) const
+		void text(int x, int y, const char* s, uint8_t colour_index) const
 		{
-			for (int i = 0; s[i]; ++i) put(x + i, y, sid_screen_code(s[i]), colour);
+			for (int i = 0; s[i]; ++i) put(x + i, y, sid_screen_code(s[i]), colour_index);
 		}
 	};
 
-	constexpr uint8_t SID_UI_BLOCK = 0xA0; // reversed space: a solid block
+	constexpr uint8_t SID_UI_BLOCK = 0xA0;  // reversed space: a solid block
 	constexpr uint8_t SID_UI_TROUGH = 0x40; // horizontal line: the empty meter
 
 	void sid_player_paint(machine_state& s)
@@ -1320,14 +1642,14 @@ namespace
 		sid_player_state& p = s.sid_player;
 		sid_player_setup_video(s);
 
-		const sid_screen w{s.RAM, p.screen_base};
+		const sid_screen w{s.RAM, s.color_ram, p.screen_base};
 		for (int i = 0; i < 1000; ++i)
 		{
 			s.RAM[p.screen_base + i] = 32;
-			s.RAM[mem_text_color + i] = 14;
+			s.color_ram[i] = 14;
 		}
 
-		w.text(7, 1, "*** LIB8BIT SID PLAYER ***", 7);
+		w.text(7, 1, "*** LIB64 SID PLAYER ***", 7);
 
 		w.text(2, 3, "NAME", 12);
 		w.text(11, 3, p.title, 1);
@@ -1343,8 +1665,8 @@ namespace
 		w.text(20, 7, "TIMING", 12);
 		w.text(29, 7, p.timed_by_cia ? "CIA" : "VBLANK", 3);
 		w.text(2, 8, "TIME", 12);
-		std::snprintf(field, sizeof(field), "%02d:%02d",
-			static_cast<int>((elapsed / 60) % 100), static_cast<int>(elapsed % 60));
+		std::snprintf(field, sizeof(field), "%02d:%02d", static_cast<int>((elapsed / 60) % 100),
+		              static_cast<int>(elapsed % 60));
 		w.text(11, 8, field, 3);
 
 		// Sub-tunes. Nine fit the number keys, which is more than almost every
@@ -1390,18 +1712,20 @@ namespace
 			}
 			w.put(22, y, sid_screen_code(']'), 11);
 
-			const char* wave = (ctrl & 0x80) ? "NOISE" : (ctrl & 0x40) ? "PULSE"
-				: (ctrl & 0x20) ? "SAW" : (ctrl & 0x10) ? "TRI" : "OFF";
+			const char* wave = (ctrl & 0x80)   ? "NOISE"
+			                   : (ctrl & 0x40) ? "PULSE"
+			                   : (ctrl & 0x20) ? "SAW"
+			                   : (ctrl & 0x10) ? "TRI"
+			                                   : "OFF";
 			w.text(24, y, wave, (ctrl & 0x01) ? 7 : 11);
 			std::snprintf(field, sizeof(field), "%04X",
-				static_cast<unsigned>(s.sid_regs[v * 7] | (s.sid_regs[v * 7 + 1] << 8)));
+			              static_cast<unsigned>(s.sid_regs[v * 7] | (s.sid_regs[v * 7 + 1] << 8)));
 			w.text(31, y, field, 11);
 		}
 
 		w.text(2, 16, "VOLUME", 12);
 		const int volume = s.sid_regs[0x18] & 0x0F;
-		for (int i = 0; i < 15; ++i)
-			w.put(11 + i, 16, i < volume ? SID_UI_BLOCK : SID_UI_TROUGH, i < volume ? 3 : 11);
+		for (int i = 0; i < 15; ++i) w.put(11 + i, 16, i < volume ? SID_UI_BLOCK : SID_UI_TROUGH, i < volume ? 3 : 11);
 
 		w.text(2, 22, "1-9", 7);
 		w.text(6, 22, "SELECT TRACK", 12);
@@ -1411,7 +1735,10 @@ namespace
 
 	// C64 keyboard matrix positions (row = PA line, col = PB line) of "1".."9"
 	// and "X", the player's only controls.
-	constexpr struct { uint8_t row, col; } SID_DIGIT_KEYS[9] = {
+	constexpr struct
+	{
+		uint8_t row, col;
+	} SID_DIGIT_KEYS[9] = {
 		{7, 0}, {7, 3}, {1, 0}, {1, 3}, {2, 0}, {2, 3}, {3, 0}, {3, 3}, {4, 0},
 	};
 	constexpr uint8_t SID_KEY_X_ROW = 2;
@@ -1470,11 +1797,18 @@ bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 	// Fresh machine, then load the tune image and the player driver.
 	_state->reset();
 	_state->sid.set_chip_model(info.chip_8580 ? sid_model::mos8580 : sid_model::mos6581);
+	// An NTSC tune's frequencies were written for the NTSC clock: run the chip
+	// at it, so the pitch is right, and the play routine at NTSC rates below.
+	_state->sid.set_sampling_parameters(is_ntsc ? sid_clock_ntsc : sid_clock_pal, _state->sid.sample_rate());
 
 	std::memcpy(_state->RAM + actual_load, image.program, image.program_len);
 
 	const bool use_cia = ((speed >> (song0 < 32 ? song0 : 31)) & 1) != 0;
-	const uint16_t timer = is_ntsc ? 0x4295 : 0x4025;
+	// The KERNAL's 60 Hz timer for a CIA-timed tune. The emulated VIC is PAL, so
+	// an NTSC tune timed by the vertical blank gets a CIA timer at the NTSC frame
+	// rate instead (263 lines of 65 cycles) rather than PAL's 50 Hz raster IRQ.
+	const bool ntsc_vblank = is_ntsc && !use_cia;
+	const uint16_t timer = ntsc_vblank ? 263 * 65 : is_ntsc ? 0x4295 : 0x4025;
 	const uint8_t init_io = sid_io_map(init_address, is_rsid);
 	const uint8_t play_io = sid_io_map(play_address, is_rsid);
 
@@ -1490,25 +1824,31 @@ bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 	// Simple IRQ handler (entered via the kernal, which already saved A/X/Y).
 	{
 		uint16_t p = SID_IRQ_HANDLER;
-		auto put = [&](std::initializer_list<int> b) { for (int v : b) _state->RAM[p++] = static_cast<uint8_t>(v); };
+		auto put = [&](std::initializer_list<int> b)
+		{
+			for (int v : b) _state->RAM[p++] = static_cast<uint8_t>(v);
+		};
 		if (play_address != 0)
 		{
-			put({0xA5, 0x01, 0x48});                 // LDA $01; PHA
-			put({0xA9, play_io, 0x85, 0x01});        // LDA #play_io; STA $01
-			put({0xA9, 0x00});                       // LDA #$00
+			put({0xA5, 0x01, 0x48});                                      // LDA $01; PHA
+			put({0xA9, play_io, 0x85, 0x01});                             // LDA #play_io; STA $01
+			put({0xA9, 0x00});                                            // LDA #$00
 			put({0x20, play_address & 0xFF, (play_address >> 8) & 0xFF}); // JSR play
-			put({0x68, 0x85, 0x01});                 // PLA; STA $01
+			put({0x68, 0x85, 0x01});                                      // PLA; STA $01
 		}
-		put({0xA9, 0xFF, 0x8D, 0x19, 0xD0});         // LDA #$FF; STA $D019
-		put({0xAD, 0x0D, 0xDC});                     // LDA $DC0D
-		put({0x68, 0xA8, 0x68, 0xAA, 0x68, 0x40});   // PLA;TAY;PLA;TAX;PLA;RTI
+		put({0xA9, 0xFF, 0x8D, 0x19, 0xD0});       // LDA #$FF; STA $D019
+		put({0xAD, 0x0D, 0xDC});                   // LDA $DC0D
+		put({0x68, 0xA8, 0x68, 0xAA, 0x68, 0x40}); // PLA;TAY;PLA;TAX;PLA;RTI
 	}
 
 	// Full IRQ handler (saves its own registers; used via the hardware vector).
 	{
 		uint16_t p = SID_IRQ_FULL;
-		auto put = [&](std::initializer_list<int> b) { for (int v : b) _state->RAM[p++] = static_cast<uint8_t>(v); };
-		put({0x48, 0x8A, 0x48, 0x98, 0x48});         // PHA;TXA;PHA;TYA;PHA
+		auto put = [&](std::initializer_list<int> b)
+		{
+			for (int v : b) _state->RAM[p++] = static_cast<uint8_t>(v);
+		};
+		put({0x48, 0x8A, 0x48, 0x98, 0x48}); // PHA;TXA;PHA;TYA;PHA
 		if (play_address != 0)
 		{
 			put({0xA5, 0x01, 0x48});
@@ -1525,21 +1865,24 @@ bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 	// Main driver at $0400.
 	{
 		uint16_t p = SID_DRIVER;
-		auto put = [&](std::initializer_list<int> b) { for (int v : b) _state->RAM[p++] = static_cast<uint8_t>(v); };
-		put({0x78});                                 // SEI
-		put({0xA9, 0x00, 0x8D, 0x1A, 0xD0});         // LDA #0; STA $D01A
-		put({0xAD, 0x19, 0xD0, 0x8D, 0x19, 0xD0});   // LDA $D019; STA $D019
+		auto put = [&](std::initializer_list<int> b)
+		{
+			for (int v : b) _state->RAM[p++] = static_cast<uint8_t>(v);
+		};
+		put({0x78});                                           // SEI
+		put({0xA9, 0x00, 0x8D, 0x1A, 0xD0});                   // LDA #0; STA $D01A
+		put({0xAD, 0x19, 0xD0, 0x8D, 0x19, 0xD0});             // LDA $D019; STA $D019
 		put({0xA9, 0x7F, 0x8D, 0x0D, 0xDC, 0x8D, 0x0D, 0xDD}); // LDA #$7F; STA $DC0D; STA $DD0D
-		put({0xAD, 0x0D, 0xDC, 0xAD, 0x0D, 0xDD});   // LDA $DC0D; LDA $DD0D
-		put({0xA9, 0x0F, 0x8D, 0x18, 0xD4});         // LDA #$0F; STA $D418 (max volume)
-		put({0xA9, timer & 0xFF, 0x8D, 0x04, 0xDC}); // set CIA1 timer A latch
+		put({0xAD, 0x0D, 0xDC, 0xAD, 0x0D, 0xDD});             // LDA $DC0D; LDA $DD0D
+		put({0xA9, 0x0F, 0x8D, 0x18, 0xD4});                   // LDA #$0F; STA $D418 (max volume)
+		put({0xA9, timer & 0xFF, 0x8D, 0x04, 0xDC});           // set CIA1 timer A latch
 		put({0xA9, (timer >> 8) & 0xFF, 0x8D, 0x05, 0xDC});
-		put({0xA9, init_io, 0x85, 0x01});            // LDA #init_io; STA $01
+		put({0xA9, init_io, 0x85, 0x01});                                          // LDA #init_io; STA $01
 		put({0xA9, song0, 0x20, init_address & 0xFF, (init_address >> 8) & 0xFF}); // LDA #song; JSR init
-		put({0xA9, 0x37, 0x85, 0x01});               // LDA #$37; STA $01
+		put({0xA9, 0x37, 0x85, 0x01});                                             // LDA #$37; STA $01
 		if (play_address != 0)
 		{
-			if (use_cia)
+			if (use_cia || ntsc_vblank)
 			{
 				put({0xA9, 0x81, 0x8D, 0x0D, 0xDC}); // enable CIA1 timer A IRQ
 				put({0xA9, 0x01, 0x8D, 0x0E, 0xDC}); // start CIA1 timer A
@@ -1553,20 +1896,18 @@ bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 		}
 		else
 		{
-			put({0xA9, 0x01, 0x8D, 0x0E, 0xDC});     // just start CIA1 timer A
+			put({0xA9, 0x01, 0x8D, 0x0E, 0xDC}); // just start CIA1 timer A
 		}
-		put({0x58});                                 // CLI
+		put({0x58}); // CLI
 		const uint16_t idle = p;
 		put({0x4C, idle & 0xFF, (idle >> 8) & 0xFF}); // JMP * (idle loop)
 	}
 
 	// Hardware vectors ($FFFA-$FFFF) and software vectors ($0314-$0319).
-	emit(0xFFFA, {SID_NMI_HANDLER & 0xFF, (SID_NMI_HANDLER >> 8) & 0xFF,
-		SID_DRIVER & 0xFF, (SID_DRIVER >> 8) & 0xFF,
-		SID_IRQ_FULL & 0xFF, (SID_IRQ_FULL >> 8) & 0xFF});
-	emit(0x0314, {SID_IRQ_HANDLER & 0xFF, (SID_IRQ_HANDLER >> 8) & 0xFF,
-		SID_IRQ_HANDLER & 0xFF, (SID_IRQ_HANDLER >> 8) & 0xFF,
-		SID_NMI_HANDLER & 0xFF, (SID_NMI_HANDLER >> 8) & 0xFF});
+	emit(0xFFFA, {SID_NMI_HANDLER & 0xFF, (SID_NMI_HANDLER >> 8) & 0xFF, SID_DRIVER & 0xFF, (SID_DRIVER >> 8) & 0xFF,
+	              SID_IRQ_FULL & 0xFF, (SID_IRQ_FULL >> 8) & 0xFF});
+	emit(0x0314, {SID_IRQ_HANDLER & 0xFF, (SID_IRQ_HANDLER >> 8) & 0xFF, SID_IRQ_HANDLER & 0xFF,
+	              (SID_IRQ_HANDLER >> 8) & 0xFF, SID_NMI_HANDLER & 0xFF, (SID_NMI_HANDLER >> 8) & 0xFF});
 
 	// Memory configuration + CPU state to enter the driver.
 	_state->RAM[0x0001] = 0x35;
@@ -1600,9 +1941,18 @@ bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 	return true;
 }
 
-bool machine::sid_player_active() const { return _state->sid_player.active; }
-int machine::sid_song_count() const { return _state->sid_player.active ? _state->sid_player.songs : 0; }
-int machine::sid_song() const { return _state->sid_player.active ? _state->sid_player.song : 0; }
+bool machine::sid_player_active() const
+{
+	return _state->sid_player.active;
+}
+int machine::sid_song_count() const
+{
+	return _state->sid_player.active ? _state->sid_player.songs : 0;
+}
+int machine::sid_song() const
+{
+	return _state->sid_player.active ? _state->sid_player.song : 0;
+}
 
 bool machine::sid_select_song(const int song)
 {

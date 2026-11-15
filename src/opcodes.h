@@ -1,6 +1,6 @@
 #pragma once
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // 6502 opcode table: one entry per byte value giving the instruction length,
 // mnemonic and addressing-mode name. Used by the assembler (opcodes.cpp).

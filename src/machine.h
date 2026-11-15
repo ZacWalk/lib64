@@ -1,6 +1,6 @@
 #pragma once
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // Core C64 machine model: memory banking through $01, the 6502 memory bus,
 // CIA timers, keyboard matrix and joystick, plus the top-level machine class
@@ -29,7 +29,6 @@ constexpr uint8_t FLAG_CONSTANT = 0x20;
 constexpr uint8_t FLAG_OVERFLOW = 0x40;
 constexpr uint8_t FLAG_SIGN = 0x80;
 
-
 // Memory map https://sta.c64.org/cbm64mem.html
 // Kernal disasm https://www.pagetable.com/c64ref/c64disasm/
 
@@ -40,7 +39,7 @@ constexpr uint32_t sid_clock_pal = 985248;
 constexpr uint32_t sid_clock_ntsc = 1022727;
 
 constexpr uint32_t mem_length_of_keyboard_buffer = 0x00C6; // 0: Buffer is empty.1-10: Buffer length.
-constexpr uint32_t mem_keyboard_buffer = 0x0277; // Keyboard buffer (10 bytes)
+constexpr uint32_t mem_keyboard_buffer = 0x0277;           // Keyboard buffer (10 bytes)
 constexpr uint32_t mem_center_color = 0xd021;
 constexpr uint32_t mem_border_color = 0xd020;
 constexpr uint32_t mem_text_color = 0xd800;
@@ -64,7 +63,6 @@ struct CPUSTATUS
 	uint8_t y;
 	uint8_t status;
 
-
 	void set_carry() { status |= FLAG_CARRY; }
 	void clear_carry() { status &= (~FLAG_CARRY); }
 	void set_zero() { status |= FLAG_ZERO; }
@@ -77,7 +75,6 @@ struct CPUSTATUS
 	void clear_overflow() { status &= (~FLAG_OVERFLOW); }
 	void set_sign() { status |= FLAG_SIGN; }
 	void clear_sign() { status &= (~FLAG_SIGN); }
-
 
 	void calc_zero(const uint16_t n)
 	{
@@ -126,19 +123,35 @@ struct cia_chip
 	uint8_t icr_data = 0; // interrupt flags; bit 7 = "an enabled interrupt fired"
 	uint8_t icr_mask = 0; // interrupt enable mask
 	bool nmi_line = true; // CIA2 only: NMI line level (true = high/inactive)
+	// The registers that are plain storage, as last written: the port latches
+	// and data direction registers at 0-3 and the serial data register at $C.
+	uint8_t regs[16] = {};
+	// Time of day, in BCD: tenths, seconds, minutes, hours (bit 7 = PM). It
+	// counts the 50 Hz mains, dividing by 5 or 6 as CRA bit 7 says. Writing the
+	// hours stops it until the tenths are written; reading the hours freezes the
+	// read-out until the tenths are read. It is stopped from reset.
+	uint8_t tod[4] = {0, 0, 0, 0x01};
+	uint8_t tod_alarm[4] = {};
+	uint8_t tod_latch[4] = {};
+	bool tod_latched = false;
+	bool tod_running = false;
+	int32_t tod_cycles = 0; // toward the next mains tick
+	uint8_t tod_ticks = 0;  // mains ticks toward the next tenth
 };
 
-// VIC-II raster / interrupt state. Full framebuffer rendering lives in vic.cpp;
-// this block only tracks the raster position and raster-compare interrupt so the
-// CPU sees accurate $D011/$D012/$D019/$D01A behaviour.
+// VIC-II register file plus raster / interrupt state. Full framebuffer
+// rendering lives in vic.cpp; this block tracks the raster position, the
+// raster-compare interrupt and the bad lines that stall the CPU.
 struct vic_chip
 {
+	uint8_t regs[0x40] = {};     // $D000-$D03F as written; read_vic applies read semantics
 	uint16_t raster_compare = 0; // raster line that raises the raster IRQ
 	uint8_t irq_enable = 0;      // $D01A interrupt enable mask
 	uint8_t irq_status = 0;      // $D019 interrupt status (bit 7 = active)
 	int32_t raster_line = 0;     // current raster line (0 .. RASTER_LINES_PER_FRAME-1)
 	int32_t line_cycle = 0;      // cycle position within the current raster line
 	int32_t last_raster_line = -1;
+	bool bad_lines = false; // DEN was set on raster $30, so this frame has bad lines
 };
 
 // The on-screen front end for a playing PSID/RSID tune: the tune's metadata,
@@ -156,12 +169,12 @@ struct sid_player_state
 	bool chip_8580 = false;    // the SID model the header asks for
 	bool timed_by_cia = false; // play routine driven by a CIA timer, not the raster
 	int songs = 1;
-	int song = 1;             // 1-based, the sub-tune now playing
+	int song = 1; // 1-based, the sub-tune now playing
 	uint16_t screen_base = 0x0400;
-	int64_t start_ticks = 0;  // clock_ticks when this sub-tune started
+	int64_t start_ticks = 0; // clock_ticks when this sub-tune started
 	uint32_t clock_hz = 985248;
 	uint8_t prev_keys[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-	uint8_t peak[3] = {};     // decaying peak-hold marker per voice
+	uint8_t peak[3] = {}; // decaying peak-hold marker per voice
 };
 
 // A PSID/RSID header as machine::parse_sid() reads it: enough to list or index
@@ -174,10 +187,10 @@ struct sid_tune_info
 	char title[33] = {};
 	char author[33] = {};
 	char released[33] = {};
-	int songs = 1;          // 1..256
-	int start_song = 1;     // 1-based, within 1..songs
-	bool chip_8580 = false; // the model the header asks for; otherwise a 6581
-	bool ntsc = false;      // the clock the header asks for; otherwise PAL
+	int songs = 1;             // 1..256
+	int start_song = 1;        // 1-based, within 1..songs
+	bool chip_8580 = false;    // the model the header asks for; otherwise a 6581
+	bool ntsc = false;         // the clock the header asks for; otherwise PAL
 	uint16_t load_address = 0; // where the image lands, after an embedded address
 	uint16_t init_address = 0;
 	uint16_t play_address = 0; // 0 when the tune installs its own interrupt
@@ -199,11 +212,11 @@ struct machine_state
 {
 	static constexpr size_t RAM_SIZE = 1024 * 64;
 
-	//6502 CPU registers
+	// 6502 CPU registers
 	CPUSTATUS cpu;
 
-	//helper variables
-	int64_t instruction_count = 0; //keep track of total instructions executed
+	// helper variables
+	int64_t instruction_count = 0; // keep track of total instructions executed
 	int64_t clock_ticks = 0;
 	uint8_t penalty_addr = 0; // set by indexed addressing when a page is crossed
 	// When true the machine behaves as a bare 6502 + flat 64K RAM (no banking,
@@ -212,6 +225,10 @@ struct machine_state
 	bool raw_ram = false;
 
 	uint8_t RAM[RAM_SIZE];
+	// Colour RAM, $D800-$DBFF: 1 KB of 4-bit cells, apart from the RAM beneath.
+	// The I/O registers have their own storage too (vic_chip, cia_chip, sid_regs),
+	// so a program keeping data under $D000-$DFFF never disturbs the chips.
+	uint8_t color_ram[0x400];
 
 	// Snapshot of the previous frame's text screen + colour RAM, used to skip
 	// expensive WM_PAINT redraws when nothing visible has changed.
@@ -238,10 +255,10 @@ struct machine_state
 	bool ext_irq = false;     // host-raised IRQ (machine::irq), cleared when taken
 
 	// --- Chips --------------------------------------------------------------
-	cia_chip cia1; // keyboard / joystick / system 60 Hz IRQ timer
-	cia_chip cia2; // VIC bank select / NMI timer
-	vic_chip vic;  // raster + raster interrupt
-	sid_chip sid;  // MOS6581/8580 sound chip
+	cia_chip cia1;  // keyboard / joystick / system 60 Hz IRQ timer
+	cia_chip cia2;  // VIC bank select / NMI timer
+	vic_chip vic;   // raster + raster interrupt
+	sid_chip sid;   // MOS6581/8580 sound chip
 	cartridge cart; // optional .CRT cartridge (ROML/ROMH + bank switching)
 	// The SID registers are write-only, so keep the last value written to each
 	// for monitors to display, and count the writes so a monitor can show which
@@ -257,6 +274,22 @@ struct machine_state
 	// --- SID tune front end -------------------------------------------------
 	// Only meaningful while a .sid tune is playing; reset() clears it.
 	sid_player_state sid_player;
+
+	// --- Autostart ------------------------------------------------------------
+	// PETSCII waiting to be typed, fed into the KERNAL's keyboard buffer a line
+	// at a time whenever the screen editor waits for a key, and a program
+	// waiting to be put in RAM before the first of it. Text not taken by
+	// typing_deadline is dropped. reset() clears both.
+	std::vector<uint8_t> typing;
+	std::vector<uint8_t> pending_prg;
+	int64_t typing_deadline = 0;
+	// The entry autostart_disk starts, by its name as the directory stores it,
+	// for the LOAD it types to read: the typed name loses what cannot be typed,
+	// and a drive takes its '*' and '?' as a pattern another file may match
+	// first. That LOAD takes it; reset() and a change of disk clear it.
+	std::vector<uint8_t> autostart_entry;
+	// The CPU has reached the screen editor's wait for a key ($E5CD).
+	void editor_waiting();
 
 	// --- Input --------------------------------------------------------------
 	uint8_t joystick1 = 0xFF; // CIA1 Port B ($DC01), bits active low
@@ -283,6 +316,7 @@ struct machine_state
 	machine_state()
 	{
 		std::memset(RAM, 0, RAM_SIZE);
+		std::memset(color_ram, 0, sizeof(color_ram));
 		std::memset(video_snapshot, 0xFF, sizeof(video_snapshot));
 		reset();
 	}
@@ -310,9 +344,14 @@ struct machine_state
 	void update_nmi();
 
 	// Per-instruction hardware clocking (advances CIA timers + VIC raster).
+	// tick_vic answers the cycles the VIC took the bus for in that span - bad
+	// lines and sprite fetches - which step_hardware charges to the CPU.
 	void tick_cia(cia_chip& c, int32_t cycles, bool is_cia2);
-	void tick_vic(int32_t cycles);
+	void tick_tod(cia_chip& c, int32_t cycles, bool is_cia2);
+	int32_t tick_vic(int32_t cycles);
 	void step_hardware(int32_t cycles);
+	uint8_t read_tod(cia_chip& c, int reg);
+	void write_tod(cia_chip& c, int reg, uint8_t value);
 
 	// Service the KERNAL LOAD routine from the mounted disk image and return
 	// through a simulated RTS. Returns false when the request is not ours (no
@@ -417,6 +456,34 @@ public:
 	void eject_disk();
 	bool has_disk() const;
 
+	// --- Starting programs as a user would ----------------------------------
+	// Type PETSCII into the KERNAL's keyboard buffer a line at a time, each time
+	// the screen editor waits for a key; a carriage return ($0D) ends a line.
+	// Text the editor has not taken five seconds after it last took any is
+	// dropped, so a program that has taken over never receives it.
+	void type_text(const uint8_t* petscii, size_t length);
+
+	// Cold-start with a disk in device 8 and start one of its files as a user
+	// would: LOAD"name",8,1, then RUN - or SYS to its load address when it loads
+	// above BASIC's start. name is the file's PETSCII name as the directory holds
+	// it; a character that cannot be typed between quotes is sent as '?'. The
+	// LOAD reads the entry so named, though a drive would take the typed name -
+	// or a '*' or '?' the stored one holds - as a pattern another file matches
+	// first. A name no entry has is taken as a pattern, as LOAD takes one. False,
+	// leaving the machine alone, when the image is not a disk or holds no such
+	// file.
+	bool autostart_disk(const uint8_t* image, size_t size, const uint8_t* name, size_t name_length);
+
+	// Cold-start, then put a .prg (or a .p00's program) in memory as
+	// LOAD"",8,1 would once BASIC is ready, and RUN or SYS it as autostart_disk
+	// does. False, leaving the machine alone, on bad data.
+	bool autostart_prg(const uint8_t* data, size_t size);
+
+	// True while an autostart still has a program to load or keys to type. A host
+	// can run frames as fast as it likes until then: the boot and the load are
+	// over in a moment rather than the seconds a real C64 takes.
+	bool autostarting() const;
+
 	// Load and start a PSID/RSID tune. Parses the header, installs a small
 	// player driver in RAM, calls the tune's init routine and arms the CIA/VIC
 	// interrupt so the play routine runs each frame. Enables audio. Pass a
@@ -443,6 +510,10 @@ public:
 	// Enable SID audio generation (off by default). Selects the chip model too.
 	void set_audio_enabled(bool enabled);
 	void set_sid_model(sid_model model);
+	// The rate generate_audio() produces samples at: 44100 Hz unless a host
+	// asks for its device's rate, from 8000 to 96000 Hz. It survives reset().
+	void set_audio_sample_rate(uint32_t hz);
+	uint32_t audio_sample_rate() const;
 	// Produce up to max_samples of mono 16-bit PCM for the cycles executed since
 	// the previous call, replaying SID register writes at cycle accuracy. Call
 	// once per frame after exec(). Returns the number of samples written.

@@ -1,22 +1,24 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // VIC-II raster renderer. Renders one raster line at a time into a 384x272
 // packed-RGB frame buffer, supporting every C64 graphics mode plus the eight
-// hardware sprites. Reads the live VIC state straight out of C64 RAM/ROM exactly
-// as the VIC-II chip would, so raster-split effects work when the CPU changes
-// registers mid-frame.
+// hardware sprites. Reads the live VIC state from its register file and its
+// memory as the chip sees it, so raster-split effects work when the CPU
+// changes registers mid-frame.
 
 #include "machine.h"
 #include "vic.h"
 
 #include <cstring>
 
+// clang-format off
 const uint32_t vic_palette[16] = {
 	0x000000, 0xFFFFFF, 0x68372B, 0x70A4B2,
 	0x6F3D86, 0x588D43, 0x352879, 0xB8C76F,
 	0x6F4F25, 0x433900, 0x9A6759, 0x444444,
 	0x6C6C6C, 0x9AD284, 0x6C5EB5, 0x959595,
 };
+// clang-format on
 
 namespace
 {
@@ -25,359 +27,283 @@ namespace
 	constexpr int BORDER_X = (VIC_FB_WIDTH - SCREEN_W) / 2;  // 32
 	constexpr int BORDER_Y = (VIC_FB_HEIGHT - SCREEN_H) / 2; // 36
 
-	constexpr int COLOR_RAM = 0xD800;
+	// The PAL X counter runs to $1F7; a sprite placed past the right edge, from
+	// $1F8 back by its widest, shows at the left instead, and $1F8 and above
+	// never match at all.
+	constexpr int SPRITE_X_WRAP = 0x1F8;
 
-	enum vic_mode
+	// The 16K the VIC-II sees, as the chip sees it: RAM, but for the character
+	// ROM at $1000-$1FFF of banks 0 and 2 and, in Ultimax mode, the cartridge's
+	// ROMH at $3000-$3FFF of every bank in its place.
+	struct vic_memory
 	{
-		MODE_STANDARD_CHARACTER = 0,
-		MODE_MULTICOLOR_CHARACTER,
-		MODE_STANDARD_BITMAP,
-		MODE_MULTICOLOR_BITMAP,
-		MODE_EXTENDED_BACKGROUND,
-		MODE_INVALID,
+		const machine_state* s;
+		int bank;
+		bool ultimax;
+
+		uint8_t operator()(const int address) const
+		{
+			const int a = address & 0x3FFF;
+			if (ultimax)
+			{
+				uint8_t out = 0;
+				if (s->cart.vic_read(static_cast<uint16_t>(a), out)) return out;
+			}
+			else if ((bank & 1) == 0 && (a & 0x3000) == 0x1000)
+			{
+				return rom_chars[a & 0x0FFF];
+			}
+			return s->RAM[(bank << 14) | a];
+		}
 	};
 
-	struct mem_addrs
+	struct line_context
 	{
-		int vic_bank;
-		int screen_addr;
-		int char_addr;
-		int bitmap_addr;
-		int char_rom_offset;
-		bool use_char_rom;
+		vic_memory mem;
+		const uint8_t* regs;
+		const uint8_t* colour;
+		uint32_t* line;  // this raster line of the frame buffer
+		uint8_t* fgmask; // 1 where the graphics are foreground, for sprite collisions
+		int screen;      // video matrix, within the bank
+		int chars;       // character generator, within the bank
+		int bitmap;      // bitmap, within the bank
+		int row;         // character row, 0-24
+		int pixel_y;     // line within the row, 0-7
+		int scroll_x;
 	};
 
-	int graphics_mode(const uint8_t* ram)
+	line_context make_context(const machine_state* s, uint32_t* line, uint8_t* fgmask)
 	{
-		const uint8_t ctrl1 = ram[VIC_CTRL1];
-		const uint8_t ctrl2 = ram[VIC_CTRL2];
-		const bool ecm = (ctrl1 & 0x40) != 0;
-		const bool bmm = (ctrl1 & 0x20) != 0;
-		const bool mcm = (ctrl2 & 0x10) != 0;
+		const uint8_t* regs = s->vic.regs;
+		// VIC bank from CIA2 port A bits 0-1, inverted. Lines set to input float
+		// high, which is why a machine that has not programmed the DDR yet (a bare
+		// reset) sees bank 0.
+		const int port_a = (s->cia2.regs[0] & s->cia2.regs[2]) | (0xFF & ~s->cia2.regs[2]);
+		const bool ultimax = s->cart.enabled && s->cart.exrom == 1 && s->cart.game == 0;
 
-		if (ecm && (bmm || mcm)) return MODE_INVALID;
-		if (bmm && mcm) return MODE_MULTICOLOR_BITMAP;
-		if (bmm) return MODE_STANDARD_BITMAP;
-		if (ecm) return MODE_EXTENDED_BACKGROUND;
-		if (mcm) return MODE_MULTICOLOR_CHARACTER;
-		return MODE_STANDARD_CHARACTER;
+		line_context c{};
+		c.mem = {s, (~port_a) & 0x03, ultimax};
+		c.regs = regs;
+		c.colour = s->color_ram;
+		c.line = line;
+		c.fgmask = fgmask;
+		c.screen = ((regs[0x18] >> 4) & 0x0F) * 0x0400;
+		c.chars = ((regs[0x18] >> 1) & 0x07) * 0x0800;
+		c.bitmap = (regs[0x18] & 0x08) ? 0x2000 : 0x0000;
+		c.scroll_x = regs[0x16] & 0x07;
+		return c;
 	}
 
-	mem_addrs get_mem_addrs(const uint8_t* ram)
+	void plot(const line_context& c, const int x, const uint32_t colour, const bool foreground)
 	{
-		// VIC bank from CIA2 $DD00 (bits 0-1, inverted). Port A lines set to input
-		// float high, which is why a machine that has not programmed the DDR yet
-		// (a bare reset) sees bank 0.
-		const int cia2_port_a = (ram[0xDD00] & ram[0xDD02]) | (0xFF & ~ram[0xDD02]);
-		const int vic_bank_num = (~cia2_port_a) & 0x03;
-		const int vic_bank = vic_bank_num * 0x4000;
-
-		const int mem_ctrl = ram[VIC_MEMORY];
-		const int screen_addr = vic_bank + ((mem_ctrl >> 4) & 0x0F) * 0x0400;
-		const int char_offset = ((mem_ctrl >> 1) & 0x07) * 0x0800;
-		const int char_addr = vic_bank + char_offset;
-		const int bitmap_addr = vic_bank + ((mem_ctrl & 0x08) ? 0x2000 : 0x0000);
-
-		// Character ROM appears to the VIC at $1000-$1FFF within banks 0 and 2; the
-		// lower-case set is the second half of the 4 KB ROM.
-		const bool use_char_rom = (vic_bank_num == 0 || vic_bank_num == 2) &&
-			(char_offset == 0x1000 || char_offset == 0x1800);
-
-		return {vic_bank, screen_addr, char_addr, bitmap_addr, char_offset & 0x0800, use_char_rom};
+		if (x < 0 || x >= VIC_FB_WIDTH) return;
+		c.line[x] = colour;
+		if (foreground) c.fgmask[x] = 1;
 	}
 
-	void render_standard_character(uint32_t* fb, uint8_t* fgmask, const uint8_t* ram, int canvas_y,
-	                               int char_row, int char_pixel_y, const mem_addrs& ma, int scroll_x)
+	void render_standard_character(const line_context& c, const int code_mask)
 	{
-		const int row_offset = canvas_y * VIC_FB_WIDTH;
-		for (int c = 0; c < 40; c++)
-		{
-			const int char_code = ram[ma.screen_addr + char_row * 40 + c];
-			const uint32_t color = vic_palette[ram[COLOR_RAM + char_row * 40 + c] & 0x0F];
-			const int glyph = char_code * 8;
-			const uint8_t line = ma.use_char_rom
-				? rom_chars[ma.char_rom_offset + glyph + char_pixel_y]
-				: ram[ma.char_addr + glyph + char_pixel_y];
-
-			for (int cx = 0; cx < 8; cx++)
-			{
-				if (line & (0x80 >> cx))
-				{
-					const int px = BORDER_X + c * 8 + cx + scroll_x;
-					if (px >= 0 && px < VIC_FB_WIDTH)
-					{
-						fb[row_offset + px] = color;
-						fgmask[px] = 1;
-					}
-				}
-			}
-		}
-	}
-
-	void render_multicolor_character(uint32_t* fb, uint8_t* fgmask, const uint8_t* ram, int canvas_y,
-	                                 int char_row, int char_pixel_y, const mem_addrs& ma, int scroll_x)
-	{
-		const int row_offset = canvas_y * VIC_FB_WIDTH;
-		const uint32_t bg0 = vic_palette[ram[0xD021] & 0x0F];
-		const uint32_t bg1 = vic_palette[ram[0xD022] & 0x0F];
-		const uint32_t bg2 = vic_palette[ram[0xD023] & 0x0F];
-
-		for (int c = 0; c < 40; c++)
-		{
-			const int char_code = ram[ma.screen_addr + char_row * 40 + c];
-			const uint8_t color_ram = ram[COLOR_RAM + char_row * 40 + c];
-			const bool is_mc = (color_ram & 0x08) != 0;
-			const int fg = color_ram & 0x07;
-			const int glyph = char_code * 8;
-			const uint8_t line = ma.use_char_rom
-				? rom_chars[ma.char_rom_offset + glyph + char_pixel_y]
-				: ram[ma.char_addr + glyph + char_pixel_y];
-
-			if (is_mc)
-			{
-				for (int cx = 0; cx < 4; cx++)
-				{
-					const int bit_pair = (line >> (6 - cx * 2)) & 0x03;
-					uint32_t color = bg0;
-					switch (bit_pair)
-					{
-					case 0: color = bg0; break;
-					case 1: color = bg1; break;
-					case 2: color = bg2; break;
-					case 3: color = vic_palette[fg]; break;
-					}
-					const int px = BORDER_X + c * 8 + cx * 2 + scroll_x;
-					if (px >= 0 && px + 1 < VIC_FB_WIDTH)
-					{
-						fb[row_offset + px] = color;
-						fb[row_offset + px + 1] = color;
-						if (bit_pair & 0x02) { fgmask[px] = 1; fgmask[px + 1] = 1; }
-					}
-				}
-			}
-			else
-			{
-				const uint32_t color = vic_palette[color_ram & 0x0F];
-				for (int cx = 0; cx < 8; cx++)
-				{
-					if (line & (0x80 >> cx))
-					{
-						const int px = BORDER_X + c * 8 + cx + scroll_x;
-						if (px >= 0 && px < VIC_FB_WIDTH)
-						{
-							fb[row_offset + px] = color;
-							fgmask[px] = 1;
-						}
-					}
-				}
-			}
-		}
-	}
-
-	void render_standard_bitmap(uint32_t* fb, uint8_t* fgmask, const uint8_t* ram, int canvas_y,
-	                            int char_row, int char_pixel_y, const mem_addrs& ma, int scroll_x)
-	{
-		const int row_offset = canvas_y * VIC_FB_WIDTH;
 		for (int col = 0; col < 40; col++)
 		{
-			const uint8_t color_byte = ram[ma.screen_addr + char_row * 40 + col];
-			const uint32_t fg = vic_palette[(color_byte >> 4) & 0x0F];
-			const uint32_t bg = vic_palette[color_byte & 0x0F];
-			const int cell = ma.bitmap_addr + (char_row * 40 + col) * 8;
-			const uint8_t line = ram[cell + char_pixel_y];
-
-			for (int cx = 0; cx < 8; cx++)
-			{
-				const int bit = (line >> (7 - cx)) & 1;
-				const int px = BORDER_X + col * 8 + cx + scroll_x;
-				if (px >= 0 && px < VIC_FB_WIDTH)
-				{
-					fb[row_offset + px] = bit ? fg : bg;
-					if (bit) fgmask[px] = 1;
-				}
-			}
+			const int cell = c.row * 40 + col;
+			const int code = c.mem(c.screen + cell) & code_mask;
+			const uint32_t colour = vic_palette[c.colour[cell] & 0x0F];
+			const uint8_t bits = c.mem(c.chars + code * 8 + c.pixel_y);
+			const int x0 = BORDER_X + col * 8 + c.scroll_x;
+			for (int px = 0; px < 8; px++)
+				if (bits & (0x80 >> px)) plot(c, x0 + px, colour, true);
 		}
 	}
 
-	void render_multicolor_bitmap(uint32_t* fb, uint8_t* fgmask, const uint8_t* ram, int canvas_y,
-	                              int char_row, int char_pixel_y, const mem_addrs& ma, int scroll_x)
+	void render_multicolor_character(const line_context& c, const int code_mask)
 	{
-		const int row_offset = canvas_y * VIC_FB_WIDTH;
-		const uint32_t bg0 = vic_palette[ram[0xD021] & 0x0F];
-
-		for (int col = 0; col < 40; col++)
-		{
-			const uint8_t screen_byte = ram[ma.screen_addr + char_row * 40 + col];
-			const uint8_t color_ram_byte = ram[COLOR_RAM + char_row * 40 + col];
-			const uint32_t color1 = vic_palette[(screen_byte >> 4) & 0x0F];
-			const uint32_t color2 = vic_palette[screen_byte & 0x0F];
-			const uint32_t color3 = vic_palette[color_ram_byte & 0x0F];
-			const int cell = ma.bitmap_addr + (char_row * 40 + col) * 8;
-			const uint8_t line = ram[cell + char_pixel_y];
-
-			for (int cx = 0; cx < 4; cx++)
-			{
-				const int bit_pair = (line >> (6 - cx * 2)) & 0x03;
-				uint32_t color = bg0;
-				switch (bit_pair)
-				{
-				case 0: color = bg0; break;
-				case 1: color = color1; break;
-				case 2: color = color2; break;
-				case 3: color = color3; break;
-				}
-				const int px = BORDER_X + col * 8 + cx * 2 + scroll_x;
-				if (px >= 0 && px + 1 < VIC_FB_WIDTH)
-				{
-					fb[row_offset + px] = color;
-					fb[row_offset + px + 1] = color;
-					if (bit_pair & 0x02) { fgmask[px] = 1; fgmask[px + 1] = 1; }
-				}
-			}
-		}
-	}
-
-	void render_extended_background(uint32_t* fb, uint8_t* fgmask, const uint8_t* ram, int canvas_y,
-	                                int char_row, int char_pixel_y, const mem_addrs& ma, int scroll_x)
-	{
-		const int row_offset = canvas_y * VIC_FB_WIDTH;
-		const uint32_t bg_colors[4] = {
-			vic_palette[ram[0xD021] & 0x0F],
-			vic_palette[ram[0xD022] & 0x0F],
-			vic_palette[ram[0xD023] & 0x0F],
-			vic_palette[ram[0xD024] & 0x0F],
+		const uint32_t bg[3] = {
+			vic_palette[c.regs[0x21] & 0x0F],
+			vic_palette[c.regs[0x22] & 0x0F],
+			vic_palette[c.regs[0x23] & 0x0F],
 		};
 
-		for (int c = 0; c < 40; c++)
+		for (int col = 0; col < 40; col++)
 		{
-			const int char_code = ram[ma.screen_addr + char_row * 40 + c];
-			const int actual = char_code & 0x3F;
-			const uint32_t bg = bg_colors[(char_code >> 6) & 0x03];
-			const uint32_t fg = vic_palette[ram[COLOR_RAM + char_row * 40 + c] & 0x0F];
-			const int glyph = actual * 8;
-			const uint8_t line = ma.use_char_rom
-				? rom_chars[ma.char_rom_offset + glyph + char_pixel_y]
-				: ram[ma.char_addr + glyph + char_pixel_y];
+			const int cell = c.row * 40 + col;
+			const int code = c.mem(c.screen + cell) & code_mask;
+			const uint8_t colour_ram = c.colour[cell];
+			const uint8_t bits = c.mem(c.chars + code * 8 + c.pixel_y);
+			const int x0 = BORDER_X + col * 8 + c.scroll_x;
 
-			for (int cx = 0; cx < 8; cx++)
+			if ((colour_ram & 0x08) == 0)
 			{
-				const int px = BORDER_X + c * 8 + cx + scroll_x;
-				if (px >= 0 && px < VIC_FB_WIDTH)
-				{
-					const bool set = (line & (0x80 >> cx)) != 0;
-					fb[row_offset + px] = set ? fg : bg;
-					if (set) fgmask[px] = 1;
-				}
+				// Colour RAM bit 3 clear: this cell is a hires character.
+				const uint32_t colour = vic_palette[colour_ram & 0x07];
+				for (int px = 0; px < 8; px++)
+					if (bits & (0x80 >> px)) plot(c, x0 + px, colour, true);
+				continue;
+			}
+
+			for (int pair = 0; pair < 4; pair++)
+			{
+				const int value = (bits >> (6 - pair * 2)) & 0x03;
+				const uint32_t colour = value == 3 ? vic_palette[colour_ram & 0x07] : bg[value];
+				// Pairs 10 and 11 are foreground for collisions; 00 and 01 are not.
+				plot(c, x0 + pair * 2, colour, value >= 2);
+				plot(c, x0 + pair * 2 + 1, colour, value >= 2);
 			}
 		}
 	}
 
-	void render_sprites(machine_state* s, uint32_t* fb, uint8_t* ram, int canvas_y,
-	                    const mem_addrs& ma)
+	void render_standard_bitmap(const line_context& c)
 	{
-		const uint8_t sprite_enable = ram[0xD015];
+		for (int col = 0; col < 40; col++)
+		{
+			const int cell = c.row * 40 + col;
+			const uint8_t colours = c.mem(c.screen + cell);
+			const uint32_t fg = vic_palette[(colours >> 4) & 0x0F];
+			const uint32_t bg = vic_palette[colours & 0x0F];
+			const uint8_t bits = c.mem(c.bitmap + cell * 8 + c.pixel_y);
+			const int x0 = BORDER_X + col * 8 + c.scroll_x;
+			for (int px = 0; px < 8; px++)
+			{
+				const bool set = (bits & (0x80 >> px)) != 0;
+				plot(c, x0 + px, set ? fg : bg, set);
+			}
+		}
+	}
+
+	void render_multicolor_bitmap(const line_context& c)
+	{
+		const uint32_t bg0 = vic_palette[c.regs[0x21] & 0x0F];
+
+		for (int col = 0; col < 40; col++)
+		{
+			const int cell = c.row * 40 + col;
+			const uint8_t colours = c.mem(c.screen + cell);
+			const uint32_t palette[4] = {
+				bg0,
+				vic_palette[(colours >> 4) & 0x0F],
+				vic_palette[colours & 0x0F],
+				vic_palette[c.colour[cell] & 0x0F],
+			};
+			const uint8_t bits = c.mem(c.bitmap + cell * 8 + c.pixel_y);
+			const int x0 = BORDER_X + col * 8 + c.scroll_x;
+			for (int pair = 0; pair < 4; pair++)
+			{
+				const int value = (bits >> (6 - pair * 2)) & 0x03;
+				plot(c, x0 + pair * 2, palette[value], value >= 2);
+				plot(c, x0 + pair * 2 + 1, palette[value], value >= 2);
+			}
+		}
+	}
+
+	void render_extended_background(const line_context& c)
+	{
+		const uint32_t bg[4] = {
+			vic_palette[c.regs[0x21] & 0x0F],
+			vic_palette[c.regs[0x22] & 0x0F],
+			vic_palette[c.regs[0x23] & 0x0F],
+			vic_palette[c.regs[0x24] & 0x0F],
+		};
+
+		for (int col = 0; col < 40; col++)
+		{
+			const int cell = c.row * 40 + col;
+			const int code = c.mem(c.screen + cell);
+			const uint32_t fg = vic_palette[c.colour[cell] & 0x0F];
+			const uint8_t bits = c.mem(c.chars + (code & 0x3F) * 8 + c.pixel_y);
+			const int x0 = BORDER_X + col * 8 + c.scroll_x;
+			for (int px = 0; px < 8; px++)
+			{
+				const bool set = (bits & (0x80 >> px)) != 0;
+				plot(c, x0 + px, set ? fg : bg[(code >> 6) & 0x03], set);
+			}
+		}
+	}
+
+	void render_sprites(machine_state* s, const line_context& c, const int raster_line)
+	{
+		uint8_t* const regs = s->vic.regs;
+		const uint8_t sprite_enable = regs[0x15];
 		if (sprite_enable == 0) return;
 
 		int8_t* collision = s->sprite_collision;
 		std::memset(collision, 0xFF, VIC_FB_WIDTH);
 
-		const uint8_t x_expand = ram[0xD01D];
-		const uint8_t y_expand = ram[0xD017];
-		const uint8_t multicolor = ram[0xD01C];
-		const uint8_t priority = ram[0xD01B];
-		const int mc0 = ram[0xD025] & 0x0F;
-		const int mc1 = ram[0xD026] & 0x0F;
-		const int sprite_ptr_base = ma.screen_addr + 0x03F8;
-		const uint8_t* fgmask = s->fg_mask;
-		const int row_offset = canvas_y * VIC_FB_WIDTH;
+		const uint8_t x_expand = regs[0x1D];
+		const uint8_t y_expand = regs[0x17];
+		const uint8_t multicolor = regs[0x1C];
+		const uint8_t priority = regs[0x1B];
+		const uint32_t mc0 = vic_palette[regs[0x25] & 0x0F];
+		const uint32_t mc1 = vic_palette[regs[0x26] & 0x0F];
 
 		// A collision latches even when the sprite is drawn behind the graphics, so
 		// compare the registers either side of the whole scanline and raise the
 		// interrupt once rather than per pixel.
-		const uint8_t sprite_sprite_before = ram[0xD01E];
-		const uint8_t sprite_bg_before = ram[0xD01F];
+		const uint8_t sprite_sprite_before = regs[0x1E];
+		const uint8_t sprite_bg_before = regs[0x1F];
 
 		// Render 7..0 so lower-numbered sprites end up on top.
 		for (int sprite = 7; sprite >= 0; sprite--)
 		{
-			if (!(sprite_enable & (1 << sprite))) continue;
+			const uint8_t bit = static_cast<uint8_t>(1 << sprite);
+			if (!(sprite_enable & bit)) continue;
 
-			const int vic_x = ram[0xD000 + sprite * 2] | ((ram[0xD010] & (1 << sprite)) ? 0x100 : 0);
-			const int vic_y = ram[0xD001 + sprite * 2];
+			// A sprite at Y is drawn from raster Y + 1.
+			const bool y_exp = (y_expand & bit) != 0;
+			const int row_in_sprite = raster_line - (regs[0x01 + sprite * 2] + 1);
+			if (row_in_sprite < 0 || row_in_sprite >= (y_exp ? 42 : 21)) continue;
+
+			int vic_x = regs[0x00 + sprite * 2] | ((regs[0x10] & bit) ? 0x100 : 0);
+			if (vic_x >= SPRITE_X_WRAP) continue;
+			if (vic_x >= SPRITE_X_WRAP - 48) vic_x -= SPRITE_X_WRAP;
 			const int sprite_x = vic_x - 24 + BORDER_X;
-			const int sprite_y = vic_y - 50 + BORDER_Y;
 
-			const bool y_exp = (y_expand & (1 << sprite)) != 0;
-			const int sprite_height = y_exp ? 42 : 21;
-			if (canvas_y < sprite_y || canvas_y >= sprite_y + sprite_height) continue;
+			const int row = y_exp ? row_in_sprite / 2 : row_in_sprite;
+			const int data = c.mem(c.screen + 0x03F8 + sprite) * 64 + row * 3;
+			const uint32_t colour = vic_palette[regs[0x27 + sprite] & 0x0F];
+			const bool is_mc = (multicolor & bit) != 0;
+			const bool behind = (priority & bit) != 0;
+			const int x_step = (x_expand & bit) ? 2 : 1;
 
-			const int sprite_row = y_exp ? (canvas_y - sprite_y) / 2 : (canvas_y - sprite_y);
-			const int sprite_ptr = ram[sprite_ptr_base + sprite];
-			const int sprite_data_addr = ma.vic_bank + sprite_ptr * 64;
-			const int sprite_color = ram[0xD027 + sprite] & 0x0F;
-
-			const bool is_mc = (multicolor & (1 << sprite)) != 0;
-			const bool x_exp = (x_expand & (1 << sprite)) != 0;
-			const bool behind = (priority & (1 << sprite)) != 0;
-			const int x_step = x_exp ? 2 : 1;
+			const auto paint = [&](const int px, const uint32_t pixel)
+			{
+				if (px < 0 || px >= VIC_FB_WIDTH) return;
+				// NOLINTNEXTLINE(bugprone-signed-char-misuse): a sprite number, or -1 where no sprite has drawn
+				const int other = collision[px];
+				if (other != -1) regs[0x1E] |= static_cast<uint8_t>(bit | (1 << other));
+				collision[px] = static_cast<int8_t>(sprite);
+				if (c.fgmask[px]) regs[0x1F] |= bit;
+				if (behind && c.fgmask[px]) return;
+				c.line[px] = pixel;
+			};
 
 			for (int byte_col = 0; byte_col < 3; byte_col++)
 			{
-				const uint8_t data = ram[sprite_data_addr + sprite_row * 3 + byte_col];
-
+				const uint8_t bits = c.mem(data + byte_col);
 				if (is_mc)
 				{
 					for (int pair = 0; pair < 4; pair++)
 					{
-						const int bits = (data >> (6 - pair * 2)) & 0x03;
-						if (bits == 0) continue;
-						int pixel_color = sprite_color;
-						switch (bits)
-						{
-						case 1: pixel_color = mc0; break;
-						case 2: pixel_color = sprite_color; break;
-						case 3: pixel_color = mc1; break;
-						}
+						const int value = (bits >> (6 - pair * 2)) & 0x03;
+						if (value == 0) continue;
+						const uint32_t pixel = value == 1 ? mc0 : value == 2 ? colour : mc1;
 						const int base_x = sprite_x + (byte_col * 8 + pair * 2) * x_step;
-						const int width = 2 * x_step;
-						for (int dx = 0; dx < width; dx++)
-						{
-							const int px = base_x + dx;
-							if (px < 0 || px >= VIC_FB_WIDTH) continue;
-							const int other = collision[px];
-							if (other != -1) ram[0xD01E] |= (1 << sprite) | (1 << other);
-							collision[px] = static_cast<int8_t>(sprite);
-							if (fgmask[px]) ram[0xD01F] |= (1 << sprite);
-							if (behind && fgmask[px]) continue;
-							fb[row_offset + px] = vic_palette[pixel_color];
-						}
+						for (int dx = 0; dx < 2 * x_step; dx++) paint(base_x + dx, pixel);
 					}
 				}
 				else
 				{
-					for (int bit = 0; bit < 8; bit++)
+					for (int px = 0; px < 8; px++)
 					{
-						if (!(data & (0x80 >> bit))) continue;
-						const int base_x = sprite_x + (byte_col * 8 + bit) * x_step;
-						for (int dx = 0; dx < x_step; dx++)
-						{
-							const int px = base_x + dx;
-							if (px < 0 || px >= VIC_FB_WIDTH) continue;
-							const int other = collision[px];
-							if (other != -1) ram[0xD01E] |= (1 << sprite) | (1 << other);
-							collision[px] = static_cast<int8_t>(sprite);
-							if (fgmask[px]) ram[0xD01F] |= (1 << sprite);
-							if (behind && fgmask[px]) continue;
-							fb[row_offset + px] = vic_palette[sprite_color];
-						}
+						if (!(bits & (0x80 >> px))) continue;
+						const int base_x = sprite_x + (byte_col * 8 + px) * x_step;
+						for (int dx = 0; dx < x_step; dx++) paint(base_x + dx, colour);
 					}
 				}
 			}
 		}
 
 		uint8_t latched = 0;
-		if (ram[0xD01E] != sprite_sprite_before) latched |= 0x02; // $D019 sprite-sprite
-		if (ram[0xD01F] != sprite_bg_before) latched |= 0x04;     // $D019 sprite-background
+		if (regs[0x1E] != sprite_sprite_before) latched |= 0x02; // $D019 sprite-sprite
+		if (regs[0x1F] != sprite_bg_before) latched |= 0x04;     // $D019 sprite-background
 		if (latched)
 		{
 			s->vic.irq_status |= latched;
@@ -391,68 +317,61 @@ void vic_render_scanline(machine_state* s, const int raster_line)
 	const int canvas_y = raster_line - VIC_FIRST_VISIBLE_RASTER;
 	if (canvas_y < 0 || canvas_y >= VIC_FB_HEIGHT) return;
 
-	uint8_t* ram = s->RAM;
-	uint32_t* fb = s->framebuffer;
+	const uint8_t* regs = s->vic.regs;
+	uint32_t* line = s->framebuffer + canvas_y * VIC_FB_WIDTH;
+	const uint32_t border = vic_palette[regs[0x20] & 0x0F];
 
-	const uint32_t border_color = vic_palette[ram[0xD020] & 0x0F];
-	const uint32_t bg_color = vic_palette[ram[0xD021] & 0x0F];
-	// DEN ($D011 bit 4) off blanks the display window down to border colour.
-	const bool display_enabled = (ram[VIC_CTRL1] & 0x10) != 0;
-	const bool in_screen_y = display_enabled &&
-		canvas_y >= BORDER_Y && canvas_y < (BORDER_Y + SCREEN_H);
-
-	const int row_offset = canvas_y * VIC_FB_WIDTH;
-	for (int x = 0; x < VIC_FB_WIDTH; x++)
+	// The vertical window is rows 51-250, or 55-246 with RSEL clear, and DEN
+	// clear keeps the border down all frame. The border covers the sprites too.
+	const int screen_y = canvas_y - BORDER_Y;
+	const bool rsel = (regs[VIC_CTRL1 & 0x3F] & 0x08) != 0;
+	const bool display_enabled = (regs[VIC_CTRL1 & 0x3F] & 0x10) != 0;
+	const bool in_window = display_enabled &&
+	                       (rsel ? screen_y >= 0 && screen_y < SCREEN_H : screen_y >= 4 && screen_y < SCREEN_H - 4);
+	if (!in_window)
 	{
-		const bool in_screen_x = x >= BORDER_X && x < (BORDER_X + SCREEN_W);
-		fb[row_offset + x] = (in_screen_x && in_screen_y) ? bg_color : border_color;
+		for (int x = 0; x < VIC_FB_WIDTH; x++) line[x] = border;
+		return;
 	}
 
-	if (!in_screen_y) return;
-
-	const int mode = graphics_mode(ram);
-	if (mode == MODE_INVALID) return;
-
-	const mem_addrs ma = get_mem_addrs(ram);
-	const int xscroll = ram[VIC_CTRL2] & 0x07;
-	const int yscroll = ram[VIC_CTRL1] & 0x07;
-	const bool rsel = (ram[VIC_CTRL1] & 0x08) != 0;
-
-	const int screen_y = canvas_y - BORDER_Y; // 0-199
-	if (!rsel && (screen_y < 4 || screen_y >= 196)) return; // 24-row border mask
+	const uint32_t background = vic_palette[regs[0x21] & 0x0F];
+	for (int x = 0; x < VIC_FB_WIDTH; x++) line[x] = background;
+	std::memset(s->fg_mask, 0, VIC_FB_WIDTH);
 
 	// YSCROLL 3 is the neutral position: the first badline is raster 0x30+YSCROLL,
 	// so the KERNAL default of 3 starts screen row 0 at the top of the window.
+	const int yscroll = regs[VIC_CTRL1 & 0x3F] & 0x07;
 	const int adjusted_y = screen_y - (yscroll - 3);
-	if (adjusted_y < 0 || adjusted_y >= 200) return;
+	line_context c = make_context(s, line, s->fg_mask);
 
-	const int char_row = adjusted_y >> 3;
-	const int char_pixel_y = adjusted_y & 7;
-
-	// Foreground mask for this scanline: 1 where the graphics layer is foreground
-	// (used for accurate sprite-background collision). Border/background = 0.
-	std::memset(s->fg_mask, 0, VIC_FB_WIDTH);
-
-	switch (mode)
+	if (adjusted_y >= 0 && adjusted_y < SCREEN_H)
 	{
-	case MODE_STANDARD_CHARACTER:
-		render_standard_character(fb, s->fg_mask, ram, canvas_y, char_row, char_pixel_y, ma, xscroll);
-		break;
-	case MODE_MULTICOLOR_CHARACTER:
-		render_multicolor_character(fb, s->fg_mask, ram, canvas_y, char_row, char_pixel_y, ma, xscroll);
-		break;
-	case MODE_STANDARD_BITMAP:
-		render_standard_bitmap(fb, s->fg_mask, ram, canvas_y, char_row, char_pixel_y, ma, xscroll);
-		break;
-	case MODE_MULTICOLOR_BITMAP:
-		render_multicolor_bitmap(fb, s->fg_mask, ram, canvas_y, char_row, char_pixel_y, ma, xscroll);
-		break;
-	case MODE_EXTENDED_BACKGROUND:
-		render_extended_background(fb, s->fg_mask, ram, canvas_y, char_row, char_pixel_y, ma, xscroll);
-		break;
-	default:
-		break;
+		c.row = adjusted_y >> 3;
+		c.pixel_y = adjusted_y & 7;
+
+		const bool ecm = (regs[VIC_CTRL1 & 0x3F] & 0x40) != 0;
+		const bool bmm = (regs[VIC_CTRL1 & 0x3F] & 0x20) != 0;
+		const bool mcm = (regs[VIC_CTRL2 & 0x3F] & 0x10) != 0;
+
+		if (bmm && mcm) render_multicolor_bitmap(c);
+		else if (bmm) render_standard_bitmap(c);
+		else if (ecm && !mcm) render_extended_background(c);
+		else if (mcm) render_multicolor_character(c, ecm ? 0x3F : 0xFF);
+		else render_standard_character(c, 0xFF);
+
+		// ECM with BMM or MCM is invalid: the chip still fetches, so sprites
+		// still collide with the graphics, but it draws them black.
+		if (ecm && (bmm || mcm))
+			for (int x = BORDER_X; x < BORDER_X + SCREEN_W; x++) line[x] = vic_palette[0];
 	}
 
-	render_sprites(s, fb, ram, canvas_y, ma);
+	render_sprites(s, c, raster_line);
+
+	// The side borders, over everything. CSEL clear narrows the window to 38
+	// columns, seven pixels in on the left and nine on the right.
+	const bool csel = (regs[VIC_CTRL2 & 0x3F] & 0x08) != 0;
+	const int left = csel ? BORDER_X : BORDER_X + 7;
+	const int right = csel ? BORDER_X + SCREEN_W : BORDER_X + SCREEN_W - 9;
+	for (int x = 0; x < left; x++) line[x] = border;
+	for (int x = right; x < VIC_FB_WIDTH; x++) line[x] = border;
 }

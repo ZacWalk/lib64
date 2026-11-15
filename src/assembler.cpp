@@ -1,4 +1,4 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // A small two-pass 6502 assembler. Pass 1 assigns label addresses and instruction
 // sizes; pass 2 resolves symbols and emits machine code. Instruction encoding is
@@ -20,8 +20,20 @@ namespace
 {
 	enum
 	{
-		AM_IMP, AM_ACC, AM_IMM, AM_ZP, AM_ZPX, AM_ZPY, AM_ABS, AM_ABSX,
-		AM_ABSY, AM_IND, AM_INDX, AM_INDY, AM_REL, AM_COUNT
+		AM_IMP,
+		AM_ACC,
+		AM_IMM,
+		AM_ZP,
+		AM_ZPX,
+		AM_ZPY,
+		AM_ABS,
+		AM_ABSX,
+		AM_ABSY,
+		AM_IND,
+		AM_INDX,
+		AM_INDY,
+		AM_REL,
+		AM_COUNT
 	};
 
 	int mode_index(const std::string_view s)
@@ -45,7 +57,10 @@ namespace
 	struct mnemonic_ops
 	{
 		int op[AM_COUNT];
-		mnemonic_ops() { for (int& o : op) o = -1; }
+		mnemonic_ops()
+		{
+			for (int& o : op) o = -1;
+		}
 	};
 
 	// Reverse map built once from the opcode table: mnemonic -> opcode per mode.
@@ -77,15 +92,20 @@ namespace
 	void trim(std::string& s)
 	{
 		const auto a = s.find_first_not_of(" \t\r\n");
-		if (a == std::string::npos) { s.clear(); return; }
+		if (a == std::string::npos)
+		{
+			s.clear();
+			return;
+		}
 		const auto b = s.find_last_not_of(" \t\r\n");
 		s = s.substr(a, b - a + 1);
 	}
 
-	std::string no_spaces(std::string s)
+	std::string no_spaces(const std::string& s)
 	{
 		std::string r;
-		for (const char c : s) if (c != ' ' && c != '\t') r.push_back(c);
+		for (const char c : s)
+			if (c != ' ' && c != '\t') r.push_back(c);
 		return r;
 	}
 
@@ -136,7 +156,11 @@ namespace
 			if (wrapped) return fail("address wrapped past $FFFF");
 			if (emitted >= max_output) return fail("program exceeds 64K of output");
 			if (final) r.bytes.push_back(b);
-			if (!started) { origin = addr; started = true; }
+			if (!started)
+			{
+				origin = addr;
+				started = true;
+			}
 			++emitted;
 			if (addr == 0xFFFF) wrapped = true;
 			addr = static_cast<uint16_t>(addr + 1);
@@ -162,13 +186,29 @@ namespace
 	int parse_term(asm_ctx& c, std::string t, bool& ok, bool& symbolic)
 	{
 		trim(t);
-		if (t.empty()) { ok = false; return 0; }
-		if (t == "*") { symbolic = true; return c.addr; }
+		if (t.empty())
+		{
+			ok = false;
+			return 0;
+		}
+		if (t == "*")
+		{
+			symbolic = true;
+			return c.addr;
+		}
 
 		const char f = t[0];
 		int value = 0;
-		if (f == '$') { if (!parse_number(t, 1, 16, value)) ok = false; return value; }
-		if (f == '%') { if (!parse_number(t, 1, 2, value)) ok = false; return value; }
+		if (f == '$')
+		{
+			if (!parse_number(t, 1, 16, value)) ok = false;
+			return value;
+		}
+		if (f == '%')
+		{
+			if (!parse_number(t, 1, 2, value)) ok = false;
+			return value;
+		}
 		if (f == '\'')
 		{
 			// 'c' or the unterminated 'c form.
@@ -195,11 +235,24 @@ namespace
 		trim(e);
 		ok = true;
 		symbolic = false;
-		if (e.empty()) { ok = false; return 0; }
+		if (e.empty())
+		{
+			ok = false;
+			return 0;
+		}
 
 		char hilo = 0;
-		if (e[0] == '<' || e[0] == '>') { hilo = e[0]; e = e.substr(1); trim(e); }
-		if (e.empty()) { ok = false; return 0; }
+		if (e[0] == '<' || e[0] == '>')
+		{
+			hilo = e[0];
+			e = e.substr(1);
+			trim(e);
+		}
+		if (e.empty())
+		{
+			ok = false;
+			return 0;
+		}
 
 		// Left-to-right chain of +/- separated terms. A sign in the leading position
 		// belongs to the term itself, and 'c' literals are skipped over.
@@ -230,9 +283,24 @@ namespace
 		return value & 0xFFFF;
 	}
 
-	enum class opclass { empty, acc, imm, indx, indy, ind, idxx, idxy, direct };
+	enum class opclass
+	{
+		empty,
+		acc,
+		imm,
+		indx,
+		indy,
+		ind,
+		idxx,
+		idxy,
+		direct
+	};
 
-	struct operand { opclass cls; std::string expr; };
+	struct operand
+	{
+		opclass cls;
+		std::string expr;
+	};
 
 	operand classify(const std::string& o)
 	{
@@ -256,14 +324,20 @@ namespace
 		const auto it = mnemonic_table().find(m);
 		if (it == mnemonic_table().end()) return c.fail("unknown instruction '" + mnemonic + "'");
 		const mnemonic_ops& ops = it->second;
-		const auto has = [&](int mode) { return ops.op[mode] >= 0; };
+		const auto has = [&](int mode)
+		{
+			return ops.op[mode] >= 0;
+		};
 
 		const operand od = classify(no_spaces(operand_text));
 		bool ok = true, symbolic = false;
 		int value = 0;
 		int mode = -1;
 
-		const auto expr = [&] { value = parse_expr(c, od.expr, ok, symbolic); };
+		const auto expr = [&]
+		{
+			value = parse_expr(c, od.expr, ok, symbolic);
+		};
 
 		switch (od.cls)
 		{
@@ -273,12 +347,15 @@ namespace
 			else return c.fail(m + " requires an operand");
 			break;
 		case opclass::acc:
-			if (has(AM_ACC)) mode = AM_ACC; else return c.fail(m + " has no accumulator mode");
+			if (has(AM_ACC)) mode = AM_ACC;
+			else return c.fail(m + " has no accumulator mode");
 			break;
+			// clang-format off
 		case opclass::imm: expr(); mode = AM_IMM; break;
 		case opclass::indx: expr(); mode = AM_INDX; break;
 		case opclass::indy: expr(); mode = AM_INDY; break;
 		case opclass::ind: expr(); mode = AM_IND; break;
+		// clang-format on
 		case opclass::idxx:
 			expr();
 			mode = (!symbolic && value <= 0xFF && has(AM_ZPX)) ? AM_ZPX : AM_ABSX;
@@ -305,8 +382,7 @@ namespace
 			// BRK is two bytes: the 6502 pushes PC+2, so the byte after $00 is skipped.
 			if (m == "BRK" && !c.emit(0)) return false;
 			break;
-		case AM_ACC:
-			break;
+		case AM_ACC: break;
 		case AM_IMM:
 		case AM_ZP:
 		case AM_ZPX:
@@ -330,8 +406,7 @@ namespace
 			if (!c.emit(static_cast<uint8_t>(off & 0xFF))) return false;
 			break;
 		}
-		default:
-			break;
+		default: break;
 		}
 		return true;
 	}
@@ -339,7 +414,11 @@ namespace
 	bool set_origin(asm_ctx& c, int v)
 	{
 		const auto n = static_cast<uint16_t>(v & 0xFFFF);
-		if (!c.started) { c.addr = n; return true; }
+		if (!c.started)
+		{
+			c.addr = n;
+			return true;
+		}
 		if (n < c.addr) return c.fail(".org moves backwards");
 		while (c.addr < n)
 		{
@@ -486,7 +565,11 @@ assembler_result assemble(const std::string_view source)
 	std::string current;
 	for (const char ch : source)
 	{
-		if (ch == '\n') { lines.push_back(current); current.clear(); }
+		if (ch == '\n')
+		{
+			lines.push_back(current);
+			current.clear();
+		}
 		else if (ch != '\r') current.push_back(ch);
 	}
 	lines.push_back(current);
@@ -494,7 +577,7 @@ assembler_result assemble(const std::string_view source)
 	asm_ctx c;
 	if (!run_pass(c, lines, false)) return c.r; // pass 1: labels + sizes
 	c.r.bytes.clear();
-	if (!run_pass(c, lines, true)) return c.r;  // pass 2: emit code
+	if (!run_pass(c, lines, true)) return c.r; // pass 2: emit code
 	c.r.ok = true;
 	return c.r;
 }

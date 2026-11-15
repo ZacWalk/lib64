@@ -1,4 +1,4 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // Commodore 64 character generator ROM image (4 KB) as a byte array.
 

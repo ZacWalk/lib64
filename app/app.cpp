@@ -1,15 +1,15 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
-// The C64 host is an application of libdesktop's platform layer. The emulator
-// remains a byte-in/byte-out library: this file owns media files, the C64
-// keyboard layout, presentation, menus, settings and the audio clock.
+// The C64 host is a libdesktop ui::shell application: the shell makes its
+// window, menu bar and keys. The emulator remains a byte-in/byte-out library:
+// this file owns media files, the C64 keyboard layout, presentation, menus,
+// settings and the audio clock.
 
 #include "debug.h"
 #include "disk.h"
 #include "machine.h"
 #include "libdesktop/ui.h"
-#include "libdesktop/ui/elements.h"
-#include "libdesktop/ui/menu_bar.h"
+#include "libdesktop/ui/shell.h"
 #include "libdesktop/ui/test_support.h"
 
 #include <algorithm>
@@ -36,13 +36,15 @@
 
 namespace
 {
-	constexpr std::string_view kProductName = "lib8bit";
+	constexpr std::string_view kProductName = "lib64";
 	constexpr int kFramebufferW = machine::framebuffer_width();
 	constexpr int kFramebufferH = machine::framebuffer_height();
 	constexpr int kSampleRate = 44100;
 	constexpr int kCyclesPerFrame = pal_cycles_per_frame;
 	constexpr size_t kMaxFileSize = 16 * 1024 * 1024;
 	constexpr int kAudioBlocks = 4;
+	// The menu bar's height before it is measured, at 100%.
+	constexpr int kMenuReserve = 32;
 
 	constexpr int kCmdOpen = 1001;
 	constexpr int kCmdReset = 1002;
@@ -62,7 +64,6 @@ namespace
 	constexpr uint8_t kJoyRight = 0x08;
 	constexpr uint8_t kJoyFire = 0x10;
 
-
 	enum class arrow_mode
 	{
 		cursor,
@@ -77,25 +78,19 @@ namespace
 	};
 
 	machine g_machine;
-	class screen_element;
-
-	struct app_surface
-	{
-		int width = 0;
-		int height = 0;
-		std::vector<uint32_t> pixels;
-	};
 
 	ui::frame_ptr g_frame;
-	std::shared_ptr<screen_element> g_screen;
+	// The C64's picture, and beside it the debug panel's picture and the bar that sizes the panel.
+	std::shared_ptr<ui::surface_element> g_screen;
+	std::shared_ptr<ui::surface_element> g_panel;
+	ui::element_ptr g_splitter;
+	core::surface_ptr g_screen_picture;
+	core::surface_ptr g_panel_picture;
 	std::mutex g_machine_mutex;
-	app_surface g_surface;
-	core::surface_ptr g_texture_surface;
 
 	struct frame_snapshot
 	{
-		std::vector<uint32_t> pixels = std::vector<uint32_t>(
-			static_cast<size_t>(kFramebufferW) * kFramebufferH);
+		std::vector<uint32_t> pixels = std::vector<uint32_t>(static_cast<size_t>(kFramebufferW) * kFramebufferH);
 		debug_state debug;
 	};
 
@@ -149,26 +144,9 @@ namespace
 	int g_dpi = 96;
 	int g_panel_w = 0;
 	bool g_dragging = false;
-	core::sizei g_minimum_client_size;
-	int g_menu_height = 0;
 	bool g_end_session_saved = false;
 
-	struct picture_layout
-	{
-		int x = 0;
-		int y = 0;
-		int scale = 1;
-		int width = kFramebufferW;
-		int height = kFramebufferH;
-		int picture_width = 0;
-		int splitter = -1;
-		bool debug = false;
-
-		bool operator==(const picture_layout&) const = default;
-	};
-
 	core::sizei g_client;
-	picture_layout g_layout;
 	std::vector<int16_t> g_audio_scratch(4096);
 
 	struct held_key
@@ -179,7 +157,6 @@ namespace
 	};
 
 	std::vector<held_key> g_held_keys;
-	std::vector<ui::command_ptr> g_menus;
 
 	int config_int(const std::string_view section, const std::string_view key, const int fallback)
 	{
@@ -197,7 +174,7 @@ namespace
 		const auto roaming = platform::known_path(platform::known_folder::roaming_app_data);
 		if (roaming.is_empty()) return;
 
-		g_settings_store = platform::create_ini_file_settings(roaming.combine("lib8bit"));
+		g_settings_store = platform::create_ini_file_settings(roaming.combine("lib64"));
 		g_settings_available = g_settings_store != nullptr;
 	}
 
@@ -211,8 +188,7 @@ namespace
 		const auto y = config_int("window", "y", std::numeric_limits<int>::min());
 		const auto width = config_int("window", "width", 0);
 		const auto height = config_int("window", "height", 0);
-		if (x != std::numeric_limits<int>::min() && y != std::numeric_limits<int>::min() &&
-			width > 0 && height > 0)
+		if (x != std::numeric_limits<int>::min() && y != std::numeric_limits<int>::min() && width > 0 && height > 0)
 		{
 			g_settings.placement = {x, y, x + width, y + height};
 			g_settings.has_placement = true;
@@ -236,8 +212,8 @@ namespace
 			g_settings_store->write("window", "height", std::to_string(bounds.height()));
 		}
 		g_settings_store->write("window", "maximized", std::to_string(g_frame->is_maximized() ? 1 : 0));
-		g_settings_store->write("panel", "width", std::to_string(std::max(0,
-			core::mul_div(g_panel_w, 96, std::max(1, g_dpi)))));
+		g_settings_store->write("panel", "width",
+		                        std::to_string(std::max(0, core::mul_div(g_panel_w, 96, std::max(1, g_dpi)))));
 		g_settings_store->write("panel", "visible", std::to_string(g_show_debug.load() ? 1 : 0));
 	}
 
@@ -245,9 +221,8 @@ namespace
 	{
 		if (g_frame)
 			platform::message_box(nullptr, message, kProductName,
-				{platform::message_box_buttons::ok, platform::message_box_icon::warning});
-		else
-			platform::show_error(message);
+			                      {platform::message_box_buttons::ok, platform::message_box_icon::warning});
+		else platform::show_error(message);
 	}
 
 	std::vector<uint8_t> read_file(const core::file_path& path)
@@ -271,8 +246,7 @@ namespace
 
 	bool has_signature(const std::vector<uint8_t>& bytes, const std::string_view signature)
 	{
-		return bytes.size() >= signature.size() &&
-			std::memcmp(bytes.data(), signature.data(), signature.size()) == 0;
+		return bytes.size() >= signature.size() && std::memcmp(bytes.data(), signature.data(), signature.size()) == 0;
 	}
 
 	bool is_crt(const std::vector<uint8_t>& bytes)
@@ -295,6 +269,7 @@ namespace
 	void stop_emulation_worker();
 	void reset_audio_clock();
 	void update_title();
+	void draw_panel(const ui::frame_ptr& frame);
 
 	void load_file(const core::file_path& path)
 	{
@@ -387,8 +362,7 @@ namespace
 			{"All Files", "*.*"},
 		};
 		std::vector<core::file_path> paths;
-		if (platform::prompt_for_open_paths(nullptr, paths, filters, false) && !paths.empty())
-			load_file(paths.front());
+		if (platform::prompt_for_open_paths(nullptr, paths, filters, false) && !paths.empty()) load_file(paths.front());
 	}
 
 	void release_all_keys()
@@ -410,7 +384,6 @@ namespace
 			g_joystick_taps.store(0);
 		}
 		update_title();
-		if (g_frame) g_frame->invalidate();
 	}
 
 	void apply_joystick()
@@ -426,8 +399,8 @@ namespace
 		const uint8_t bits = static_cast<uint8_t>(g_joystick.load() | g_joystick_taps.exchange(0));
 		const int port = mode == arrow_mode::joystick1 ? 1 : 2;
 		const int other = port == 1 ? 2 : 1;
-		g_machine.set_joystick(port, (bits & kJoyUp) != 0, (bits & kJoyDown) != 0,
-			(bits & kJoyLeft) != 0, (bits & kJoyRight) != 0, (bits & kJoyFire) != 0);
+		g_machine.set_joystick(port, (bits & kJoyUp) != 0, (bits & kJoyDown) != 0, (bits & kJoyLeft) != 0,
+		                       (bits & kJoyRight) != 0, (bits & kJoyFire) != 0);
 		g_machine.set_joystick(other, false, false, false, false, false);
 	}
 
@@ -439,13 +412,11 @@ namespace
 		if (g_paused.load())
 		{
 			g_machine.flush_keys();
-			for (int i = 0; i < count; ++i)
-				g_machine.set_key(positions[i].row, positions[i].col, pressed);
+			for (int i = 0; i < count; ++i) g_machine.set_key(positions[i].row, positions[i].col, pressed);
 		}
 		else
 		{
-			for (int i = 0; i < count; ++i)
-				g_machine.queue_key(positions[i].row, positions[i].col, pressed);
+			for (int i = 0; i < count; ++i) g_machine.queue_key(positions[i].row, positions[i].col, pressed);
 		}
 	}
 
@@ -466,6 +437,7 @@ namespace
 		};
 
 		const auto key = static_cast<char32_t>(vk);
+		// clang-format off
 		switch (key)
 		{
 		case U'A': return one(1, 2); case U'B': return one(3, 4); case U'C': return one(2, 4);
@@ -483,6 +455,7 @@ namespace
 		case U'0': return one(4, 3);
 		default: break;
 		}
+		// clang-format on
 
 		if (key == platform::keys::OEM_COMMA) return one(5, 7);
 		if (key == platform::keys::OEM_PERIOD) return one(5, 4);
@@ -531,15 +504,9 @@ namespace
 			rejected,
 		};
 
-		void set_stream(platform::audio_stream_ptr stream)
-		{
-			_stream = std::move(stream);
-		}
+		void set_stream(platform::audio_stream_ptr stream) { _stream = std::move(stream); }
 
-		[[nodiscard]] bool can_step() const
-		{
-			return !_stream || _stream->can_write();
-		}
+		[[nodiscard]] bool can_step() const { return !_stream || _stream->can_write(); }
 
 		// Checking before generate_audio is important: a full ring must not
 		// advance SID's audio clock and then silently lose that frame.
@@ -548,13 +515,11 @@ namespace
 			if (!_stream) return submit_result::no_stream;
 			if (!_stream->can_write()) return submit_result::not_ready;
 
-			const int count = c64.generate_audio(_samples.data(),
-				static_cast<int>(_samples.size()));
+			const int count = c64.generate_audio(_samples.data(), static_cast<int>(_samples.size()));
 			if (count <= 0) return submit_result::submitted;
-			return _stream->write(std::span<const int16_t>(_samples.data(),
-				static_cast<size_t>(count)))
-				? submit_result::submitted
-				: submit_result::rejected;
+			return _stream->write(std::span<const int16_t>(_samples.data(), static_cast<size_t>(count)))
+			           ? submit_result::submitted
+			           : submit_result::rejected;
 		}
 
 		void stop()
@@ -625,7 +590,6 @@ namespace
 		}
 		if (was_sid) g_media.clear();
 		update_title();
-		if (g_frame) g_frame->invalidate();
 	}
 
 	void eject_media()
@@ -642,14 +606,13 @@ namespace
 		g_disk_inserted = false;
 		g_media.clear();
 		update_title();
-		if (g_frame) g_frame->invalidate();
 	}
 
 	void toggle_pause()
 	{
 		g_paused.store(!g_paused.load());
 		update_title();
-		if (g_frame) g_frame->invalidate();
+		draw_panel(g_frame);
 	}
 
 	void close_app()
@@ -713,89 +676,10 @@ namespace
 		return x >= 0 ? x : -1;
 	}
 
-	picture_layout compute_layout()
+	core::color vic_color(const int index)
 	{
-		picture_layout layout;
-		layout.picture_width = g_client.cx;
-		layout.splitter = splitter_x(g_client.cx);
-		layout.debug = layout.splitter >= 0;
-		if (layout.debug) layout.picture_width = layout.splitter;
-
-		if (g_client.cx <= 0 || g_client.cy <= 0 || layout.picture_width <= 0)
-			return layout;
-
-		layout.scale = std::max(1, std::min(
-			layout.picture_width / kFramebufferW, g_client.cy / kFramebufferH));
-		const int render_width = kFramebufferW * layout.scale;
-		const int render_height = kFramebufferH * layout.scale;
-		layout.x = (layout.picture_width - render_width) / 2;
-		layout.y = (g_client.cy - render_height) / 2;
-		return layout;
-	}
-
-	void fill_rect(const int x, const int y, const int width, const int height,
-		const uint32_t colour)
-	{
-		if (g_surface.pixels.empty() || width <= 0 || height <= 0) return;
-
-		const int left = std::max(0, x);
-		const int top = std::max(0, y);
-		const int right = std::min(g_surface.width, x + width);
-		const int bottom = std::min(g_surface.height, y + height);
-		if (right <= left || bottom <= top) return;
-
-		for (int row = top; row < bottom; ++row)
-		{
-			auto* const begin = g_surface.pixels.data() +
-				static_cast<size_t>(row) * g_surface.width + left;
-			std::fill(begin, begin + right - left, colour);
-		}
-	}
-
-	void blit_picture(const uint32_t* source, const int dx, const int dy, const int scale)
-	{
-		if (!source || g_surface.pixels.empty()) return;
-
-		const int width = kFramebufferW * scale;
-		const int height = kFramebufferH * scale;
-		const bool fits = dx >= 0 && dy >= 0 &&
-			dx + width <= g_surface.width && dy + height <= g_surface.height;
-		if (fits)
-		{
-			const size_t row_bytes = static_cast<size_t>(width) * sizeof(uint32_t);
-			for (int y = 0; y < kFramebufferH; ++y)
-			{
-				auto* const row = g_surface.pixels.data() +
-					static_cast<size_t>(dy + y * scale) * g_surface.width + dx;
-				for (int x = 0; x < kFramebufferW; ++x)
-					std::fill_n(row + static_cast<size_t>(x) * scale, scale, source[x]);
-				for (int r = 1; r < scale; ++r)
-					std::memcpy(row + static_cast<size_t>(r) * g_surface.width, row, row_bytes);
-				source += kFramebufferW;
-			}
-			return;
-		}
-
-		// The platform lets the user resize below the preferred minimum. Keep the
-		// compositor safe and retain the same nearest-neighbour mapping there.
-		for (int sy = 0; sy < kFramebufferH; ++sy)
-		{
-			for (int sx = 0; sx < kFramebufferW; ++sx)
-			{
-				const uint32_t colour = source[sy * kFramebufferW + sx];
-				for (int yy = 0; yy < scale; ++yy)
-				{
-					const int y = dy + sy * scale + yy;
-					if (y < 0 || y >= g_surface.height) continue;
-					for (int xx = 0; xx < scale; ++xx)
-					{
-						const int x = dx + sx * scale + xx;
-						if (x >= 0 && x < g_surface.width)
-							g_surface.pixels[static_cast<size_t>(y) * g_surface.width + x] = colour;
-					}
-				}
-			}
-		}
+		const uint32_t rgb = vic_palette[index];
+		return core::color(core::rgba((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF));
 	}
 
 	uint8_t screen_code(const char c)
@@ -810,10 +694,10 @@ namespace
 	class panel_writer
 	{
 	public:
-		panel_writer(const int left, const int top, const int right, const int bottom,
-			const int scale, const bool measuring = false)
-			: _left(left), _top(top), _right(right), _bottom(bottom), _scale(scale),
-			  _y(top), _measuring(measuring)
+		panel_writer(core::surface& target, const int left, const int top, const int right, const int bottom,
+		             const int scale, const bool measuring = false) :
+			_target(target), _left(left), _top(top), _right(right), _bottom(bottom), _scale(scale), _y(top),
+			_measuring(measuring)
 		{
 		}
 
@@ -849,6 +733,7 @@ namespace
 	private:
 		void glyph(const int x, const int y, const uint8_t code, const uint32_t colour) const
 		{
+			const auto extent = _target.dimensions();
 			const uint8_t* const rows = rom_chars + static_cast<size_t>(code) * 8;
 			for (int gy = 0; gy < 8; ++gy)
 			{
@@ -859,18 +744,19 @@ namespace
 					for (int sy = 0; sy < _scale; ++sy)
 					{
 						const int py = y + gy * _scale + sy;
-						if (py < 0 || py >= g_surface.height) continue;
+						if (py < 0 || py >= extent.cy) continue;
+						auto* const row = reinterpret_cast<uint32_t*>(_target.pixels_line(py));
 						for (int sx = 0; sx < _scale; ++sx)
 						{
 							const int px = x + gx * _scale + sx;
-							if (px >= 0 && px < g_surface.width)
-								g_surface.pixels[static_cast<size_t>(py) * g_surface.width + px] = colour;
+							if (px >= 0 && px < extent.cx) row[px] = colour;
 						}
 					}
 				}
 			}
 		}
 
+		core::surface& _target;
 		int _left;
 		int _top;
 		int _right;
@@ -889,19 +775,16 @@ namespace
 
 		char flags[9];
 		static constexpr char flag_names[] = "NV-BDIZC";
-		for (int i = 0; i < 8; ++i)
-			flags[i] = (state.status & (0x80 >> i)) ? flag_names[i] : '.';
+		for (int i = 0; i < 8; ++i) flags[i] = (state.status & (0x80 >> i)) ? flag_names[i] : '.';
 		flags[8] = 0;
 
 		writer.line(head, "CPU");
-		writer.line(text, "PC %04X A %02X X %02X Y %02X SP %02X",
-			state.pc, state.a, state.x, state.y, state.sp);
-		writer.line(text, "P %02X %s  IRQ %c NMI %c", state.status, flags,
-			state.irq_pending ? '*' : '.', state.nmi_pending ? '*' : '.');
-		writer.line(text, "$01 %02X %s %s %s %s%s", state.port,
-			state.basic_on ? "BAS" : "---", state.kernal_on ? "KER" : "---",
-			state.io_on ? "I/O" : "---", state.char_on ? "CHR" : "---",
-			state.cart_inserted ? " CRT" : "");
+		writer.line(text, "PC %04X A %02X X %02X Y %02X SP %02X", state.pc, state.a, state.x, state.y, state.sp);
+		writer.line(text, "P %02X %s  IRQ %c NMI %c", state.status, flags, state.irq_pending ? '*' : '.',
+		            state.nmi_pending ? '*' : '.');
+		writer.line(text, "$01 %02X %s %s %s %s%s", state.port, state.basic_on ? "BAS" : "---",
+		            state.kernal_on ? "KER" : "---", state.io_on ? "I/O" : "---", state.char_on ? "CHR" : "---",
+		            state.cart_inserted ? " CRT" : "");
 
 		writer.blank();
 		writer.line(head, "DISASSEMBLY");
@@ -912,36 +795,30 @@ namespace
 			switch (line.length)
 			{
 			case 1: std::snprintf(raw, sizeof(raw), "%02X      ", line.bytes[0]); break;
-			case 2: std::snprintf(raw, sizeof(raw), "%02X %02X   ",
-				line.bytes[0], line.bytes[1]); break;
-			default: std::snprintf(raw, sizeof(raw), "%02X %02X %02X",
-				line.bytes[0], line.bytes[1], line.bytes[2]); break;
+			case 2: std::snprintf(raw, sizeof(raw), "%02X %02X   ", line.bytes[0], line.bytes[1]); break;
+			default:
+				std::snprintf(raw, sizeof(raw), "%02X %02X %02X", line.bytes[0], line.bytes[1], line.bytes[2]);
+				break;
 			}
-			writer.line(i == state.current ? mark : text, "%c%04X %s %s",
-				i == state.current ? '>' : ' ', line.address, raw, line.text);
+			writer.line(i == state.current ? mark : text, "%c%04X %s %s", i == state.current ? '>' : ' ', line.address,
+			            raw, line.text);
 		}
 
 		writer.blank();
 		writer.line(head, "VIC-II");
-		writer.line(text, "MODE %-9s RASTER %03u/%03u", state.mode,
-			state.raster, state.raster_compare);
-		writer.line(text, "D011 %02X D016 %02X D018 %02X",
-			state.ctrl1, state.ctrl2, state.mem_ptr);
-		writer.line(text, "SCR %04X CHR %04X BMP %04X",
-			state.screen_base, state.char_base, state.bitmap_base);
-		writer.line(text, "BANK %04X BORDER %X BG %X",
-			state.vic_bank, state.border, state.background);
-		writer.line(text, "SPR %02X HIT %02X/%02X IRQ %02X/%02X",
-			state.sprite_enable, state.sprite_sprite_hit, state.sprite_bg_hit,
-			state.vic_irq_status, state.vic_irq_enable);
+		writer.line(text, "MODE %-9s RASTER %03u/%03u", state.mode, state.raster, state.raster_compare);
+		writer.line(text, "D011 %02X D016 %02X D018 %02X", state.ctrl1, state.ctrl2, state.mem_ptr);
+		writer.line(text, "SCR %04X CHR %04X BMP %04X", state.screen_base, state.char_base, state.bitmap_base);
+		writer.line(text, "BANK %04X BORDER %X BG %X", state.vic_bank, state.border, state.background);
+		writer.line(text, "SPR %02X HIT %02X/%02X IRQ %02X/%02X", state.sprite_enable, state.sprite_sprite_hit,
+		            state.sprite_bg_hit, state.vic_irq_status, state.vic_irq_enable);
 
 		writer.blank();
 		writer.line(head, "CIA");
 		for (int c = 0; c < 2; ++c)
-			writer.line(text, "%d A %04X%c B %04X%c ICR %02X/%02X", c + 1,
-				state.timer[c * 2], state.timer_running[c * 2] ? '>' : '.',
-				state.timer[c * 2 + 1], state.timer_running[c * 2 + 1] ? '>' : '.',
-				state.cia_icr[c], state.cia_mask[c]);
+			writer.line(text, "%d A %04X%c B %04X%c ICR %02X/%02X", c + 1, state.timer[c * 2],
+			            state.timer_running[c * 2] ? '>' : '.', state.timer[c * 2 + 1],
+			            state.timer_running[c * 2 + 1] ? '>' : '.', state.cia_icr[c], state.cia_mask[c]);
 
 		writer.blank();
 		writer.line(head, "SID");
@@ -949,19 +826,15 @@ namespace
 		{
 			const uint8_t* const regs = state.sid + v * 7;
 			writer.line(text, "%d F%04X W%02X AD%02X SR%02X E%02X", v + 1,
-				static_cast<unsigned>(regs[0] | (regs[1] << 8)), regs[4],
-				regs[5], regs[6], state.sid_env[v]);
+			            static_cast<unsigned>(regs[0] | (regs[1] << 8)), regs[4], regs[5], regs[6], state.sid_env[v]);
 		}
-		writer.line(text, "VOL %X FILT %02X CUTOFF %04X", state.sid[0x18] & 0x0F,
-			state.sid[0x17], static_cast<unsigned>((state.sid[0x15] & 0x07) |
-			(state.sid[0x16] << 3)));
+		writer.line(text, "VOL %X FILT %02X CUTOFF %04X", state.sid[0x18] & 0x0F, state.sid[0x17],
+		            static_cast<unsigned>((state.sid[0x15] & 0x07) | (state.sid[0x16] << 3)));
 
 		writer.blank();
 		writer.line(head, "HOST");
-		if (fps < 0)
-			writer.line(text, "EMULATION PAUSED");
-		else
-			writer.line(fps < 48 ? mark : text, "EMULATION %d FPS (%d%%)", fps, fps * 2);
+		if (fps < 0) writer.line(text, "EMULATION PAUSED");
+		else writer.line(fps < 48 ? mark : text, "EMULATION %d FPS (%d%%)", fps, fps * 2);
 	}
 
 	int emulated_fps()
@@ -995,67 +868,57 @@ namespace
 		return value;
 	}
 
-	void draw_debug_panel(const int left, const int top, const int right, const int bottom,
-		const debug_state& state)
+	void draw_debug_panel(core::surface& target, const debug_state& state)
 	{
+		const auto extent = target.dimensions();
 		const int scale = text_scale();
-		panel_writer measure(left, top, right, bottom, scale, true);
+		panel_writer measure(target, 0, 0, extent.cx, extent.cy, scale, true);
 		emit_debug_lines(measure, state, emulated_fps());
 
-		const int x = left + std::max(scale, (right - left - measure.width()) / 2);
-		const int y = top + std::max(scale, (bottom - top - measure.height()) / 2);
-		panel_writer draw(x, y, right, bottom, scale);
+		const int x = std::max(scale, (extent.cx - measure.width()) / 2);
+		const int y = std::max(scale, (extent.cy - measure.height()) / 2);
+		panel_writer draw(target, x, y, extent.cx, extent.cy, scale);
 		emit_debug_lines(draw, state, emulated_fps());
 	}
 
-	bool compose()
+	// The debug panel is a picture of its own, the panel's size, drawn again with each frame and each layout.
+	void draw_panel(const ui::frame_ptr& frame)
 	{
-		if (g_client.cx <= 0 || g_client.cy <= 0) return false;
-
+		if (!g_panel || !g_panel->is_visible()) return;
+		const auto extent = g_panel->bounds.extent();
+		if (extent.cx <= 0 || extent.cy <= 0) return;
+		if (!g_panel_picture || g_panel_picture->dimensions() != extent)
 		{
-			std::lock_guard lock(g_frame_mutex);
-			if (g_frame_fresh)
-			{
-				std::swap(g_frame_ready, g_frame_read);
-				g_frame_fresh = false;
-			}
-		}
-		const frame_snapshot& current = g_frames[g_frame_read];
-		const picture_layout layout = compute_layout();
-		if (layout != g_layout ||
-			g_surface.pixels.size() != static_cast<size_t>(g_client.cx) * g_client.cy)
-		{
-			g_layout = layout;
-			g_surface.width = g_client.cx;
-			g_surface.height = g_client.cy;
-			g_surface.pixels.assign(static_cast<size_t>(g_client.cx) * g_client.cy, 0);
-		}
-		else
-		{
-			std::fill(g_surface.pixels.begin(), g_surface.pixels.end(), 0);
+			g_panel_picture = std::make_shared<core::surface>();
+			g_panel_picture->alloc(extent, core::texture_format::RGB);
 		}
 
-		fill_rect(0, 0, g_layout.picture_width, g_layout.y, 0);
-		fill_rect(0, g_layout.y + kFramebufferH * g_layout.scale,
-			g_layout.picture_width, g_client.cy, 0);
-		fill_rect(0, g_layout.y, g_layout.x, kFramebufferH * g_layout.scale, 0);
-		fill_rect(g_layout.x + kFramebufferW * g_layout.scale, g_layout.y,
-			g_layout.picture_width, kFramebufferH * g_layout.scale, 0);
-		blit_picture(current.pixels.data(), g_layout.x, g_layout.y, g_layout.scale);
-
-		if (g_layout.debug)
-		{
-			fill_rect(g_layout.splitter, 0, splitter_width(), g_client.cy, vic_palette[11]);
-			const int panel_x = g_layout.splitter + splitter_width();
-			fill_rect(panel_x, 0, g_client.cx - panel_x, g_client.cy, vic_palette[6]);
-			draw_debug_panel(panel_x, 0, g_client.cx, g_client.cy, current.debug);
-		}
-		return true;
+		for (int y = 0; y < extent.cy; ++y)
+			std::fill_n(reinterpret_cast<uint32_t*>(g_panel_picture->pixels_line(y)), extent.cx, vic_palette[6]);
+		draw_debug_panel(*g_panel_picture, g_frames[g_frame_read].debug);
+		g_panel->present(g_panel_picture, frame);
 	}
 
-	bool present()
+	// The newest frame the worker published goes into the screen's picture: its texture is updated in place and
+	// only the picture is presented again, as is the debug panel beside it.
+	void present_frame()
 	{
-		return compose();
+		if (!g_frame || !g_screen || !g_screen_picture) return;
+		{
+			std::lock_guard lock(g_frame_mutex);
+			if (!g_frame_fresh) return;
+			std::swap(g_frame_ready, g_frame_read);
+			g_frame_fresh = false;
+		}
+
+		const auto& pixels = g_frames[g_frame_read].pixels;
+		for (int y = 0; y < kFramebufferH; ++y)
+		{
+			std::memcpy(g_screen_picture->pixels_line(y), pixels.data() + static_cast<size_t>(y) * kFramebufferW,
+			            static_cast<size_t>(kFramebufferW) * sizeof(uint32_t));
+		}
+		g_screen->present(g_screen_picture, g_frame);
+		draw_panel(g_frame);
 	}
 
 	void sleep_ms(const int milliseconds)
@@ -1071,15 +934,13 @@ namespace
 			g_ui_tick_pending.store(false);
 			if (g_shutting_down.load()) return;
 
-			if (g_sid_stopped_pending.exchange(false) &&
-				g_sid_stopped_generation.load() == g_media_generation.load())
+			if (g_sid_stopped_pending.exchange(false) && g_sid_stopped_generation.load() == g_media_generation.load())
 			{
 				g_media.clear();
 				update_title();
 			}
-			if (g_audio_failure_pending.exchange(false))
-				update_title();
-			if (g_frame) g_frame->invalidate();
+			if (g_audio_failure_pending.exchange(false)) update_title();
+			present_frame();
 		});
 	}
 
@@ -1088,7 +949,7 @@ namespace
 		if (!g_audio_ok.exchange(false)) return;
 		g_audio_pacer.stop();
 		g_audio_failure_pending.store(true);
-		std::fprintf(stderr, "lib8bit: audio stream rejected a PCM block; falling back to wall-clock pacing\n");
+		std::fprintf(stderr, "lib64: audio stream rejected a PCM block; falling back to wall-clock pacing\n");
 	}
 
 	void emulation_worker()
@@ -1144,27 +1005,23 @@ namespace
 				{
 					audio_result = g_audio_pacer.submit(g_machine);
 					if (audio_result == audio_pacer::submit_result::not_ready ||
-						audio_result == audio_pacer::submit_result::no_stream)
+					    audio_result == audio_pacer::submit_result::no_stream)
 					{
 						// The pre-flight check and write are intentionally separate
 						// public operations. If capacity changed between them,
 						// consume this frame's SID span before switching clocks.
-						g_machine.generate_audio(g_audio_scratch.data(),
-							static_cast<int>(g_audio_scratch.size()));
+						g_machine.generate_audio(g_audio_scratch.data(), static_cast<int>(g_audio_scratch.size()));
 					}
 				}
 				else
 				{
-					g_machine.generate_audio(g_audio_scratch.data(),
-						static_cast<int>(g_audio_scratch.size()));
+					g_machine.generate_audio(g_audio_scratch.data(), static_cast<int>(g_audio_scratch.size()));
 					audio_result = audio_pacer::submit_result::submitted;
 				}
 
-				if (audio && audio_result != audio_pacer::submit_result::submitted)
-					audio_fallback_after_rejection();
+				if (audio && audio_result != audio_pacer::submit_result::submitted) audio_fallback_after_rejection();
 
-				std::memcpy(target.pixels.data(), g_machine.framebuffer(),
-					target.pixels.size() * sizeof(uint32_t));
+				std::memcpy(target.pixels.data(), g_machine.framebuffer(), target.pixels.size() * sizeof(uint32_t));
 				if (g_show_debug.load()) g_machine.capture_debug(target.debug);
 				if (g_sid_playing.load() && !g_machine.sid_player_active())
 				{
@@ -1194,10 +1051,10 @@ namespace
 
 		g_worker_stop.store(false);
 		g_worker_active.store(true);
-		g_emu_executor = platform::create_serial_executor("lib8bit-emulator");
+		g_emu_executor = platform::create_serial_executor("lib64-emulator");
 		if (!g_emu_executor || !g_emu_executor->post(emulation_worker))
 		{
-			std::fprintf(stderr, "lib8bit: could not start the emulation worker\n");
+			std::fprintf(stderr, "lib64: could not start the emulation worker\n");
 			if (g_emu_executor) g_emu_executor->stop();
 			g_emu_executor.reset();
 			g_worker_active.store(false);
@@ -1217,54 +1074,54 @@ namespace
 		g_worker_active.store(false);
 	}
 
-	class screen_element final : public ui::element
+	// What the shell shows below the menu bar: the C64's picture, and to its right, when the debug panel is shown,
+	// the splitter and the panel. It keeps an element's porch, a thin black frame around them.
+	class screen_layout final : public ui::elements
 	{
-		mutable render::texture_ptr _texture;
+		bool _laid_out = false;
 
 	public:
-		screen_element() : ui::element(ui::element_options(ui::flex_item::grow | ui::flex_item::stretch))
+		screen_layout()
 		{
+			add(g_screen);
+			add(g_splitter);
+			add(g_panel);
 		}
 
-		core::sizei measure(render::measure_context&, const int) const override
+		void layout(render::measure_context& mc, const core::recti bounds_in) override
 		{
-			return {kFramebufferW + splitter_width(), kFramebufferH};
-		}
-
-		void reset_graphics()
-		{
-			_texture.reset();
-			g_texture_surface.reset();
-		}
-
-		void render(render::draw_context& dc, const core::pointi element_offset) const override
-		{
-			const auto destination = bounds.offset(element_offset);
-			if (!compose())
+			bounds = bounds_in;
+			const auto old_dpi = g_dpi;
+			g_dpi = std::max(96, static_cast<int>(mc.scale_factor * 96.0 + 0.5));
+			if (!_laid_out)
 			{
-				dc.draw_rect(destination, core::color(core::rgba(0, 0, 0)));
+				g_panel_w = g_settings.panel_w96 > 0 ? core::mul_div(static_cast<int>(g_settings.panel_w96), g_dpi, 96)
+				                                     : default_panel_width();
+				_laid_out = true;
+			}
+			else if (old_dpi != g_dpi)
+			{
+				g_panel_w = core::mul_div(g_panel_w, g_dpi, std::max(1, old_dpi));
+			}
+
+			g_client = bounds.extent();
+			const int splitter = splitter_x(g_client.cx);
+			const bool debug = splitter >= 0;
+			g_splitter->is_visible(debug);
+			g_panel->is_visible(debug);
+			if (!debug)
+			{
+				g_screen->layout(mc, bounds);
 				return;
 			}
 
-			if (!g_texture_surface || g_texture_surface->dimensions() != core::sizei{g_surface.width, g_surface.height})
-			{
-				g_texture_surface = std::make_shared<core::surface>();
-				g_texture_surface->alloc({g_surface.width, g_surface.height}, core::texture_format::RGB);
-			}
-
-			for (int y = 0; y < g_surface.height; ++y)
-			{
-				std::memcpy(g_texture_surface->pixels_line(y),
-					g_surface.pixels.data() + static_cast<size_t>(y) * g_surface.width,
-					static_cast<size_t>(g_surface.width) * sizeof(uint32_t));
-			}
-
-			if (!_texture) _texture = dc.create_texture();
-			if (_texture)
-			{
-				_texture->update(g_texture_surface);
-				dc.draw_texture(_texture, destination, 1.0f, render::texture_sampler::point);
-			}
+			const int splitter_left = bounds.left + splitter;
+			const int panel_left = splitter_left + splitter_width();
+			g_screen->layout(mc, {bounds.left, bounds.top, splitter_left, bounds.bottom});
+			g_splitter->layout(mc, {splitter_left, bounds.top, panel_left, bounds.bottom});
+			g_panel->layout(mc, {panel_left, bounds.top, bounds.right, bounds.bottom});
+			// The paint that follows a layout shows the panel at its new size.
+			draw_panel(nullptr);
 		}
 	};
 
@@ -1291,30 +1148,9 @@ namespace
 		if (bit) g_joystick.fetch_and(static_cast<uint8_t>(~bit));
 	}
 
-	void sync_held_keys()
-	{
-		std::vector<char32_t> released;
-		for (const auto& held : g_held_keys)
-		{
-			if (!platform::is_key_down(held.key)) released.emplace_back(held.key);
-		}
-		for (const auto key : released) release_held_key(key);
-
-		if (!platform::is_key_down(platform::keys::PRIOR)) g_restore_sent.store(false);
-
-		if (g_arrow_mode.load() != arrow_mode::cursor)
-		{
-			if (!platform::is_key_down(platform::keys::UP)) release_joystick_key(platform::keys::UP);
-			if (!platform::is_key_down(platform::keys::DOWN)) release_joystick_key(platform::keys::DOWN);
-			if (!platform::is_key_down(platform::keys::LEFT)) release_joystick_key(platform::keys::LEFT);
-			if (!platform::is_key_down(platform::keys::RIGHT)) release_joystick_key(platform::keys::RIGHT);
-			if (!platform::is_key_down(platform::keys::SPACE)) release_joystick_key(platform::keys::SPACE);
-		}
-	}
-
 	ui::command_ptr make_command(const std::string_view text, std::function<void()> invoke = {},
-		const bool checked = false, const bool enabled = true, const char32_t key = 0,
-		const uint32_t key_state = 0)
+	                             const bool checked = false, const bool enabled = true, const char32_t key = 0,
+	                             const uint32_t key_state = 0)
 	{
 		auto result = std::make_shared<ui::command>();
 		result->text = text;
@@ -1339,12 +1175,11 @@ namespace
 		{
 			std::vector<ui::command_ptr> result;
 			result.emplace_back(make_command("&Open...", open_dialog, false, true, U'O', ctrl));
-			result.emplace_back(make_command("&Pause", toggle_pause, g_paused.load(), true,
-				platform::keys::F9, 0));
+			result.emplace_back(make_command("&Pause", toggle_pause, g_paused.load(), true, platform::keys::F9, 0));
 			result.emplace_back(nullptr);
 			result.emplace_back(make_command("&Reset (Keeps Cartridge)", reset_machine, false, true, U'R', ctrl));
-			result.emplace_back(make_command("&Eject Media", eject_media, false,
-				g_cart_inserted || g_disk_inserted, U'E', ctrl));
+			result.emplace_back(
+				make_command("&Eject Media", eject_media, false, g_cart_inserted || g_disk_inserted, U'E', ctrl));
 			result.emplace_back(nullptr);
 			result.emplace_back(make_command("E&xit", close_app));
 			return result;
@@ -1356,11 +1191,11 @@ namespace
 		{
 			return std::vector<ui::command_ptr>{
 				make_command("&Cursor Keys", [] { set_arrow_mode(arrow_mode::cursor); },
-					g_arrow_mode.load() == arrow_mode::cursor),
+			                 g_arrow_mode.load() == arrow_mode::cursor),
 				make_command("Joystick &1", [] { set_arrow_mode(arrow_mode::joystick1); },
-					g_arrow_mode.load() == arrow_mode::joystick1),
+			                 g_arrow_mode.load() == arrow_mode::joystick1),
 				make_command("Joystick &2", [] { set_arrow_mode(arrow_mode::joystick2); },
-					g_arrow_mode.load() == arrow_mode::joystick2),
+			                 g_arrow_mode.load() == arrow_mode::joystick2),
 			};
 		};
 
@@ -1371,7 +1206,11 @@ namespace
 			return std::vector<ui::command_ptr>{make_command("&Debug Panel", []
 			{
 				g_show_debug.store(!g_show_debug.load());
-				if (g_frame) g_frame->invalidate();
+				if (g_frame)
+				{
+					g_frame->layout();
+					g_frame->invalidate();
+				}
 			}, g_show_debug.load(), true, platform::keys::F11)};
 		};
 
@@ -1383,42 +1222,44 @@ namespace
 			result.emplace_back(make_command("&Keyboard...", []
 			{
 				platform::message_box(nullptr,
-					"Emulated C64 keys\n\n"
-					"Keys are mapped by position, so Shift types the C64's own shifted symbols.\n\n"
-					"Esc\tRUN/STOP\n"
-					"Page Up\tRESTORE (with Esc held: RUN/STOP+RESTORE)\n"
-					"Tab\tCommodore key\n"
-					"` (backtick)\tLeft arrow\n"
-					"Home\tCLR/HOME\n"
-					"Backspace, Delete\tINST/DEL\n"
-					"' (quote)\t:\n"
-					"[  ]\t@  *\n"
-					"\\ (backslash)\tUp arrow\n"
-					"Page Down\t=\n"
-					"End\tpound\n"
-					"F1 - F8\tC64 function keys\n"
-					"Arrow keys\tCursor keys, or the Input menu's joystick\n"
-					"Space\tSpace bar, and joystick fire in joystick mode\n\n"
-					"Host shortcuts\n\n"
-					"Ctrl+O\tOpen a file\n"
-					"Ctrl+R\tReset (the cartridge stays inserted)\n"
-					"Ctrl+E\tEject media\n"
-					"F9\tPause / resume\n"
-					"F11\tShow / hide the debug panel\n"
-					"F12\tAbout",
-					kProductName, {platform::message_box_buttons::ok, platform::message_box_icon::info});
+				                      "Emulated C64 keys\n\n"
+				                      "Keys are mapped by position, so Shift types the C64's own shifted symbols.\n\n"
+				                      "Esc\tRUN/STOP\n"
+				                      "Page Up\tRESTORE (with Esc held: RUN/STOP+RESTORE)\n"
+				                      "Tab\tCommodore key\n"
+				                      "` (backtick)\tLeft arrow\n"
+				                      "Home\tCLR/HOME\n"
+				                      "Backspace, Delete\tINST/DEL\n"
+				                      "' (quote)\t:\n"
+				                      "[  ]\t@  *\n"
+				                      "\\ (backslash)\tUp arrow\n"
+				                      "Page Down\t=\n"
+				                      "End\tpound\n"
+				                      "F1 - F8\tC64 function keys\n"
+				                      "Arrow keys\tCursor keys, or the Input menu's joystick\n"
+				                      "Space\tSpace bar, and joystick fire in joystick mode\n\n"
+				                      "Host shortcuts\n\n"
+				                      "Ctrl+O\tOpen a file\n"
+				                      "Ctrl+R\tReset (the cartridge stays inserted)\n"
+				                      "Ctrl+E\tEject media\n"
+				                      "F9\tPause / resume\n"
+				                      "F11\tShow / hide the debug panel\n"
+				                      "F12\tAbout",
+				                      kProductName,
+				                      {platform::message_box_buttons::ok, platform::message_box_icon::info});
 			}, false, true));
 			result.emplace_back(make_command("&About...", []
 			{
 				platform::message_box(nullptr,
-					"lib8bit\n\nA Commodore 64 emulator.\n\n"
-					"Open or drop a .PRG, .CRT, .SID, .D64, .D71 or .D81 file, "
-					"or pass one on the command line.\n"
-					"A .SID tune opens in a player screen: 1-9 select a sub-tune "
-					"and X stops playback.\n"
-					"Use the Input menu to point the arrow keys at the C64 cursor "
-					"keys or at joystick port 1 or 2.",
-					kProductName, {platform::message_box_buttons::ok, platform::message_box_icon::info});
+				                      "lib64\n\nA Commodore 64 emulator.\n\n"
+				                      "Open or drop a .PRG, .CRT, .SID, .D64, .D71 or .D81 file, "
+				                      "or pass one on the command line.\n"
+				                      "A .SID tune opens in a player screen: 1-9 select a sub-tune "
+				                      "and X stops playback.\n"
+				                      "Use the Input menu to point the arrow keys at the C64 cursor "
+				                      "keys or at joystick port 1 or 2.",
+				                      kProductName,
+				                      {platform::message_box_buttons::ok, platform::message_box_icon::info});
 			}, false, true, platform::keys::F12));
 			return result;
 		};
@@ -1426,24 +1267,11 @@ namespace
 		return {std::move(file), std::move(input), std::move(view), std::move(help)};
 	}
 
-	class lib8bit_app final : public ui::app, public ui::frame_host,
-		public std::enable_shared_from_this<lib8bit_app>
+	class lib64_app final : public ui::shell
 	{
-		std::shared_ptr<ui::elements> _root;
-		ui::control_ptr _menu_bar;
-		bool _laid_out = false;
-		bool _positioned = false;
-
-		core::pointi content_location(const core::pointi loc) const
-		{
-			return g_screen ? loc - g_screen->bounds.top_left() : loc;
-		}
-
 		bool is_splitter(const core::pointi loc) const
 		{
-			const auto content = content_location(loc);
-			return g_layout.splitter >= 0 && content.x >= g_layout.splitter &&
-				content.x < g_layout.splitter + splitter_width();
+			return g_splitter && g_splitter->is_visible() && g_splitter->bounds.contains(loc);
 		}
 
 		bool dispatch_c64_key(const char32_t key, const platform::key_state keys)
@@ -1491,39 +1319,20 @@ namespace
 		}
 
 	public:
-		bool wants_gpu() const override
-		{
-			return !g_headless;
-		}
+		lib64_app() : shell(make_options()) {}
 
-		bool key_down(const char32_t key, const platform::key_state keys) override
+		static ui::shell_options make_options()
 		{
-			// Alt combinations belong to the native window/menu handling, not the C64 matrix.
-			if (keys.alt) return false;
-			if (ui::dispatch_accelerator(g_menus, key, keys)) return true;
-			return dispatch_c64_key(key, keys);
-		}
-
-		bool text_input(std::string_view) override
-		{
-			return false;
-		}
-
-		ui::focus_mode focus_mode() const override
-		{
-			return ui::focus_mode::none;
-		}
-
-		void track_menu(const ui::frame_ptr& parent, const core::recti bounds,
-			const std::vector<ui::command_ptr>& commands) override
-		{
-			if (parent) parent->track_menu(bounds, commands);
-		}
-
-		bool load_settings(const platform::setting_file_ptr&) override
-		{
-			// The host keeps the historical roaming INI path rather than the process-wide store.
-			return true;
+			ui::shell_options options;
+			options.title = std::string(kProductName);
+			options.colors = render::color_style{core::rgba(0, 0, 0), core::rgba(255, 255, 255),
+			                                     core::rgba(64, 64, 64)};
+			options.accepts_drops = true;
+			// A tune plays on, and a game runs on, behind a minimized window.
+			options.run_minimized = true;
+			// Placement is kept with the debug panel's settings, under the historical keys of the app's own INI.
+			options.remember_placement = false;
+			return options;
 		}
 
 		bool parse_command_line(const std::string_view command_line) override
@@ -1543,75 +1352,57 @@ namespace
 				}
 			}
 			// -test is an offscreen UI run, not platform's console-only mode.
+			auto& options = initial_options();
+			options.offscreen = g_headless;
+			options.gpu = !g_headless;
 			return false;
 		}
 
-		int run_console_mode() override
+		bool load_settings(const platform::setting_file_ptr&) override
 		{
-			return 0;
-		}
-
-		bool init(const std::string_view) override
-		{
+			// The host keeps the historical roaming INI path rather than the process-wide store.
 			if (!g_headless)
 			{
 				configure_settings();
 				load_ui_settings();
 			}
-			else
+			g_show_debug.store(g_headless || g_settings.show_debug);
+
+			// The shell scales these from 100%. The least client holds the picture at its own pixels at any scale,
+			// and the panel is measured in pixels, so both are given back at 100%.
+			g_dpi = std::max(96, platform::primary_screen_dpi());
+			const auto unscaled = [](const int pixels)
 			{
-				g_settings_available = false;
-				g_settings_store.reset();
-			}
-
-			g_menus = build_menu();
-			_menu_bar = ui::make_menu_bar(g_menus);
-			g_screen = std::make_shared<screen_element>();
-			_root = std::make_shared<ui::elements>();
-			_root->flex_container.direction = ui::flex_direction::column;
-			_root->flex_container.wrap = ui::flex_wrap::no_wrap;
-			_root->flex_container.align_items = ui::flex_align::stretch;
-			_root->add(_menu_bar);
-			_root->add(g_screen);
-
-			const auto initial_dpi = std::max(96, platform::primary_screen_dpi());
-			g_dpi = initial_dpi;
-			const auto initial_scale = initial_dpi / 96.0;
-			const auto initial_menu_reserve = core::round(32 * initial_scale);
-			const auto initial_panel = g_headless || g_settings.show_debug
-				? default_panel_width() + splitter_width() : 0;
-			g_minimum_client_size = {kFramebufferW + splitter_width(), kFramebufferH + initial_menu_reserve};
-
-			ui::frame_style style;
-			style.hardware_accelerated = wants_gpu();
-			style.drawn_caption = false;
-			style.can_focus = true;
-			style.can_drop = true;
-			style.offscreen = g_headless;
-			style.resizable = true;
-			style.colors = {core::rgba(0, 0, 0), core::rgba(255, 255, 255), core::rgba(64, 64, 64)};
-			style.client_size = {
-				core::round(kFramebufferW * 2 * initial_scale) + initial_panel + core::round(96 * initial_scale),
-				core::round(kFramebufferH * 2 * initial_scale) + core::round(80 * initial_scale) + initial_menu_reserve
+				return (pixels * 96 + g_dpi - 1) / g_dpi;
 			};
-			style.minimum_client = g_minimum_client_size;
+			const int panel = g_show_debug.load() ? unscaled(default_panel_width() + splitter_width()) : 0;
+			auto& options = initial_options();
+			options.client_size = {kFramebufferW * 2 + panel + 96, kFramebufferH * 2 + 80 + kMenuReserve};
+			options.minimum_client = {unscaled(kFramebufferW + splitter_width()),
+			                          unscaled(kFramebufferH) + kMenuReserve};
+			return true;
+		}
 
-			// Placement is deliberately restored from the old keys below; passing the store here would
-			// let the frame prefer its newer opaque window_rect value instead.
-			g_frame = ui::create_app_frame(shared_from_this(), nullptr, shared_from_this(), style);
-			if (!g_frame) return false;
-			g_frame->window_text(kProductName);
+		std::vector<ui::command_ptr> make_menus() override { return build_menu(); }
+
+		ui::element_ptr make_content() override
+		{
+			g_screen = std::make_shared<ui::surface_element>(ui::surface_element::style{.whole_multiples = true});
+			g_splitter = std::make_shared<ui::canvas_element>([](render::draw_context& dc, const core::recti bounds)
+			{ dc.draw_rect(bounds, vic_color(11)); });
+			g_panel = std::make_shared<ui::surface_element>(ui::surface_element::style{.background = vic_color(6)});
+			g_screen_picture = std::make_shared<core::surface>();
+			g_screen_picture->alloc({kFramebufferW, kFramebufferH}, core::texture_format::RGB);
+			return std::make_shared<screen_layout>();
+		}
+
+		bool start(std::string_view) override
+		{
+			g_frame = frame();
 			if (g_settings.has_placement)
 			{
 				g_frame->window_bounds(g_settings.placement, true);
 				if (g_settings.maximized) g_frame->sys_command(platform::sys_command_type::MAXIMIZE);
-				_positioned = true;
-			}
-			else
-			{
-				// The native window can lay out before create_app_frame returns; force one pass after
-				// g_frame is assigned so the measured menu height also drives default centring.
-				g_frame->layout();
 			}
 
 			g_machine.set_render_enabled(true);
@@ -1629,43 +1420,47 @@ namespace
 			return true;
 		}
 
-		bool owns_loop() const override
-		{
-			return true;
-		}
+		// The worker paces the emulator by the audio stream, or by the wall clock without one, which no fixed
+		// step can follow; so the loop stays the app's, and waits for the frames the worker hands over.
+		bool owns_loop() const override { return true; }
 
 		int main_loop() override;
 
-		void idle() override
+		bool key(const char32_t key, const platform::key_state keys) override
 		{
-			sync_held_keys();
+			// Alt combinations belong to the native window/menu handling, not the C64 matrix.
+			if (keys.alt) return false;
+			return dispatch_c64_key(key, keys);
 		}
 
-		void frame_tick() override
+		bool key_up(const char32_t key, const platform::key_state keys) override
 		{
-			sync_held_keys();
-			if (g_frame) g_frame->invalidate();
+			const auto taken = shell::key_up(key, keys);
+			if (key == platform::keys::PRIOR) g_restore_sent.store(false);
+			release_joystick_key(key);
+			release_held_key(key);
+			return taken;
+		}
+
+		void idle() override
+		{
+			// An open menu takes the keyboard, and with it the releases: the C64 lets go of its keys then, as it
+			// does when the window loses the keyboard.
+			if (ui::menu_active.load() > 0 && (!g_held_keys.empty() || g_joystick.load() != 0 || g_restore_sent.load()))
+				release_all_keys();
 		}
 
 		void system_event(const platform::os_event_type event) override
 		{
 			switch (event)
 			{
-			case platform::os_event_type::session_ending:
-				save_settings();
-				break;
-			case platform::os_event_type::graphics_device_lost:
-				if (g_screen) g_screen->reset_graphics();
-				if (g_frame) g_frame->invalidate();
-				break;
-			case platform::os_event_type::system_suspending:
-				stop_audio();
-				break;
+			case platform::os_event_type::session_ending: save_settings(); break;
+			case platform::os_event_type::graphics_device_lost: shell::system_event(event); break;
+			case platform::os_event_type::system_suspending: stop_audio(); break;
 			case platform::os_event_type::system_resumed:
 				if (!g_headless) start_audio();
 				break;
-			default:
-				break;
+			default: break;
 			}
 		}
 
@@ -1673,10 +1468,10 @@ namespace
 		{
 			// The close box and taskbar close arrive here without going through a menu command.
 			if (!g_headless) save_settings();
-			return true;
+			return shell::can_exit();
 		}
 
-		void exit() override
+		void stop() override
 		{
 			g_shutting_down.store(true);
 			stop_emulation_worker();
@@ -1685,66 +1480,28 @@ namespace
 
 		void final_exit() override
 		{
-			if (g_screen) g_screen->reset_graphics();
-			_root.reset();
-			_menu_bar.reset();
-			g_menus.clear();
+			shell::final_exit();
+			g_screen.reset();
+			g_panel.reset();
+			g_splitter.reset();
+			g_screen_picture.reset();
+			g_panel_picture.reset();
 			g_frame.reset();
 			g_settings_store.reset();
 		}
 
-		void on_window_layout(render::measure_context& mc, const core::sizei extent,
-			const bool is_minimized) override
-		{
-			if (is_minimized || !_root || !g_screen) return;
-			const auto old_dpi = g_dpi;
-			g_dpi = std::max(96, static_cast<int>(mc.scale_factor * 96.0 + 0.5));
-			if (!_laid_out)
-			{
-				g_panel_w = g_settings.panel_w96 > 0
-					? core::mul_div(static_cast<int>(g_settings.panel_w96), g_dpi, 96)
-					: default_panel_width();
-				g_show_debug.store(g_headless || g_settings.show_debug);
-				_laid_out = true;
-			}
-			else if (old_dpi != g_dpi)
-			{
-				g_panel_w = core::mul_div(g_panel_w, g_dpi, std::max(1, old_dpi));
-			}
-
-			_root->layout(mc, core::recti(extent));
-			g_menu_height = _menu_bar ? _menu_bar->bounds.height() : 0;
-			g_client = g_screen->bounds.extent();
-
-			if (!_positioned && !g_headless && g_frame)
-			{
-				const auto scale = g_frame->scale_factor();
-				const auto panel = g_show_debug.load() ? g_panel_w + splitter_width() : 0;
-				const auto width = core::round(kFramebufferW * 2 * scale) + panel + core::round(96 * scale);
-				const auto height = core::round(kFramebufferH * 2 * scale) + g_menu_height + core::round(80 * scale);
-				const auto screen = platform::primary_screen_size();
-				const auto left = std::max(0, (screen.cx - width) / 2);
-				const auto top = std::max(0, (screen.cy - height) / 2);
-				g_frame->window_bounds({left, top, left + width, top + height}, true);
-				_positioned = true;
-			}
-		}
-
-		void on_window_paint(render::draw_context& dc) override
-		{
-			if (_root) _root->render(dc, {});
-		}
-
 		void on_window_destroy() override
 		{
+			shell::on_window_destroy();
 			g_shutting_down.store(true);
 			stop_emulation_worker();
 			stop_audio();
 			g_running.store(false);
 		}
 
-		void focus_changed(const bool has_focus, const ui::control_ptr&) override
+		void focus_changed(const bool has_focus, const ui::control_ptr& child) override
 		{
+			shell::focus_changed(has_focus, child);
 			if (!has_focus)
 			{
 				g_dragging = false;
@@ -1752,17 +1509,24 @@ namespace
 			}
 		}
 
+		// Below the menu bar the pointer acts on the splitter alone, so the app answers it here rather than through the
+		// element tree's hit testing.
 		void on_mouse_move(const core::pointi loc, const bool is_tracking) override
 		{
 			if (g_dragging && !is_tracking) g_dragging = false;
 			if (g_dragging)
 			{
-				g_panel_w = g_client.cx - content_location(loc).x - splitter_width();
+				g_panel_w = content_bounds().right - loc.x - splitter_width();
 				g_panel_w = panel_width(g_client.cx);
-				if (g_frame) g_frame->invalidate();
+				if (g_frame)
+				{
+					g_frame->layout();
+					g_frame->invalidate();
+				}
 			}
-			if (g_frame) g_frame->set_cursor(is_splitter(loc) || g_dragging
-				? platform::cursor::left_right : platform::cursor::normal);
+			if (g_frame)
+				g_frame->set_cursor(is_splitter(loc) || g_dragging ? platform::cursor::left_right
+				                                                   : platform::cursor::normal);
 		}
 
 		void on_mouse_left_button_down(const core::pointi loc, const platform::key_state) override
@@ -1777,7 +1541,8 @@ namespace
 		void on_mouse_left_button_up(const core::pointi loc, const platform::key_state) override
 		{
 			g_dragging = false;
-			if (g_frame) g_frame->set_cursor(is_splitter(loc) ? platform::cursor::left_right : platform::cursor::normal);
+			if (g_frame)
+				g_frame->set_cursor(is_splitter(loc) ? platform::cursor::left_right : platform::cursor::normal);
 		}
 
 		void on_mouse_leave(const core::pointi) override
@@ -1786,14 +1551,14 @@ namespace
 			if (g_frame) g_frame->set_cursor(platform::cursor::normal);
 		}
 
-		platform::drop_effect drag_over(const platform::clipboard_data& data,
-			const platform::key_state, const core::pointi) override
+		platform::drop_effect drag_over(const platform::clipboard_data& data, const platform::key_state,
+		                                const core::pointi) override
 		{
 			return data.has_drop_files() ? platform::drop_effect::copy : platform::drop_effect::none;
 		}
 
-		platform::drop_effect drag_drop(platform::clipboard_data& data,
-			const platform::key_state, const core::pointi) override
+		platform::drop_effect drag_drop(platform::clipboard_data& data, const platform::key_state,
+		                                const core::pointi) override
 		{
 			if (!data.has_drop_files()) return platform::drop_effect::none;
 			const auto paths = data.drop_paths();
@@ -1801,72 +1566,7 @@ namespace
 			return platform::drop_effect::copy;
 		}
 
-		void visit_elements(const std::function<void(const ui::element_ptr&, core::pointi)>& visit) override
-		{
-			if (_root) visit(_root, {});
-		}
-
 		int run_headless();
-	};
-
-	class recording_texture final : public render::texture
-	{
-		bool _valid = false;
-
-	public:
-		render::texture_update_result update(const render::video_frame_ptr&) override
-		{
-			return render::texture_update_result::failed;
-		}
-
-		render::texture_update_result update(const core::const_surface_ptr& surface) override
-		{
-			if (!surface) return render::texture_update_result::failed;
-			_dimensions = surface->dimensions();
-			_format = surface->format();
-			_valid = true;
-			return render::texture_update_result::tex_updated;
-		}
-
-		render::texture_update_result update(core::sizei dims, core::texture_format format,
-			core::orientation orientation, const uint8_t*, size_t, size_t) override
-		{
-			_dimensions = dims;
-			_format = format;
-			_orientation = orientation;
-			_valid = true;
-			return render::texture_update_result::tex_updated;
-		}
-
-		bool is_valid() const override
-		{
-			return _valid;
-		}
-	};
-
-	class recording_draw_context final : public ui::test::fake_draw_context
-	{
-		std::shared_ptr<recording_texture> _recording_texture = std::make_shared<recording_texture>();
-
-	public:
-		render::texture_ptr drawn_texture;
-		core::recti drawn_bounds;
-
-		recording_draw_context(const core::recti clip) : ui::test::fake_draw_context(clip)
-		{
-		}
-
-		render::texture_ptr create_texture() override
-		{
-			return _recording_texture;
-		}
-
-		void draw_texture(const render::texture_ptr& texture, const core::recti dst, float,
-			render::texture_sampler) override
-		{
-			drawn_texture = texture;
-			drawn_bounds = dst;
-		}
 	};
 
 	class fake_audio_stream final : public platform::audio_stream
@@ -1877,9 +1577,7 @@ namespace
 		size_t _last_block_size = 0;
 
 	public:
-		explicit fake_audio_stream(const int capacity) : _capacity(capacity)
-		{
-		}
+		explicit fake_audio_stream(const int capacity) : _capacity(capacity) {}
 
 		int queued_blocks() const override { return _queued; }
 		bool can_write() const override { return _queued < _capacity; }
@@ -1897,9 +1595,7 @@ namespace
 			return true;
 		}
 
-		void set_volume(float) override
-		{
-		}
+		void set_volume(float) override {}
 
 		void stop() override
 		{
@@ -1921,18 +1617,16 @@ namespace
 		std::lock_guard lock(g_machine_mutex);
 		const uint8_t bit = static_cast<uint8_t>(1u << col);
 		return pressed ? (g_machine._state->key_matrix[row] & bit) == 0
-			: (g_machine._state->key_matrix[row] & bit) != 0;
+		               : (g_machine._state->key_matrix[row] & bit) != 0;
 	}
 
 	bool wait_for_frame(const int64_t target)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-		while (g_running.load() && g_emu_frames.load() < target &&
-			std::chrono::steady_clock::now() < deadline)
+		while (g_running.load() && g_emu_frames.load() < target && std::chrono::steady_clock::now() < deadline)
 		{
 			if (!platform::pump_events()) return false;
 			platform::pump_ui_tasks(0);
-			if (g_frame) g_frame->redraw_now();
 			sleep_ms(1);
 		}
 		return g_emu_frames.load() >= target;
@@ -1945,17 +1639,19 @@ namespace
 		return wait_for_frame(g_emu_frames.load() + 2);
 	}
 
-	int lib8bit_app::run_headless()
+	int lib64_app::run_headless()
 	{
 		platform::attach_console();
 		int failures = 0;
+		int checks = 0;
 		const auto check = [&](const bool ok, const std::string_view what)
 		{
+			++checks;
 			platform::write_stdout(std::string(ok ? "PASS " : "FAIL ") + std::string(what) + "\n");
 			if (!ok) ++failures;
 		};
 
-		if (!start_emulation_worker()) check(false, "offscreen emulation worker starts");
+		check(start_emulation_worker(), "offscreen emulation worker starts");
 		const int64_t initial_frames = g_emu_frames.load();
 		check(wait_for_frame(initial_frames + 120), "background worker publishes PAL frames");
 		for (int i = 0; i < 4 && g_running.load(); ++i)
@@ -1968,28 +1664,52 @@ namespace
 
 		check(g_client.cx > 0 && g_client.cy > 0, "offscreen window reports a client area");
 		check(!g_settings_available, "headless test leaves user settings untouched");
-		check(g_minimum_client_size.cx == kFramebufferW + splitter_width() &&
-			g_minimum_client_size.cy >= kFramebufferH + g_menu_height,
-			"window minimum preserves framebuffer, splitter and menu bar");
-		check(g_layout.scale >= 1 && g_layout.scale == static_cast<int>(g_layout.scale),
-			"picture layout uses an integer scale");
-		check(g_layout.x >= 0 && g_layout.y >= 0, "picture is letterboxed inside the client");
-		check(g_surface.width == g_client.cx && g_surface.height == g_client.cy &&
-			g_surface.pixels.size() == static_cast<size_t>(g_client.cx) * g_client.cy,
-			"surface covers the client area");
-		check(std::any_of(g_surface.pixels.begin(), g_surface.pixels.end(),
-			[](const uint32_t pixel) { return pixel != 0; }),
-			"framebuffer and debug panel reach the surface");
+		const auto scale = std::max(96, platform::primary_screen_dpi()) / 96.0;
+		const int menu_height = content_bounds().top - core::round(content()->padding.cy * frame()->scale_factor());
+		check(core::round(options().minimum_client.cx * scale) >= kFramebufferW + splitter_width() &&
+		          core::round(options().minimum_client.cy * scale) >= kFramebufferH + menu_height,
+		      "window minimum preserves framebuffer, splitter and menu bar");
+		const auto picture = g_screen->picture_bounds();
+		const int multiple = picture.width() / kFramebufferW;
+		check(multiple >= 1 && picture.width() == kFramebufferW * multiple &&
+		          picture.height() == kFramebufferH * multiple,
+		      "picture is scaled by a whole multiple");
+		check(g_screen->bounds.intersection(picture) == picture, "picture is letterboxed inside its element");
+		check(g_screen_picture->dimensions() == core::sizei{kFramebufferW, kFramebufferH} && g_panel_picture &&
+		          g_panel_picture->dimensions() == g_panel->bounds.extent(),
+		      "pictures cover the framebuffer and the debug panel");
+		const auto drawn = [](const core::surface_ptr& surface)
+		{
+			if (!surface || surface->empty()) return false;
+			const auto extent = surface->dimensions();
+			for (int y = 0; y < extent.cy; ++y)
+			{
+				const auto* const row = reinterpret_cast<const uint32_t*>(surface->pixels_line(y));
+				if (std::any_of(row, row + extent.cx, [](const uint32_t pixel) { return pixel != 0; })) return true;
+			}
+			return false;
+		};
+		check(drawn(g_screen_picture) && drawn(g_panel_picture), "framebuffer and debug panel reach their pictures");
 
-		if (g_screen) g_screen->reset_graphics();
-		recording_draw_context draw{core::recti(g_client)};
+		const uint64_t paints = render::ui_perf.paints.load();
+		const uint64_t redraws = render::ui_perf.redraws.load();
+		wait_for_frame(g_emu_frames.load() + 10);
+		check(render::ui_perf.redraws.load() > redraws && render::ui_perf.paints.load() == paints,
+		      "each new frame is presented again without painting the window");
+
+		// The pictures' textures are let go of, as a lost device's are, and made again in the recording context.
+		system_event(platform::os_event_type::graphics_device_lost);
+		ui::test::recording_draw_context draw{core::recti(0, 0, content_bounds().right, content_bounds().bottom)};
 		on_window_paint(draw);
-		check(draw.drawn_texture && draw.drawn_bounds.extent() == g_client,
-			"repaint uses render::draw_context");
-		const auto recorded_texture = std::dynamic_pointer_cast<recording_texture>(draw.drawn_texture);
-		check(recorded_texture && recorded_texture->format() == core::texture_format::RGB &&
-			g_texture_surface && g_texture_surface->format() == core::texture_format::RGB,
-			"screen texture uses opaque RGB pixels");
+		const auto screen = std::find_if(draw.textures.begin(), draw.textures.end(), [](const auto& texture)
+		{ return texture.texture && texture.texture->surface == g_screen_picture; });
+		check(screen != draw.textures.end() && screen->bounds == g_screen->picture_bounds(),
+		      "repaint draws the screen through render::draw_context");
+		check(screen != draw.textures.end() && screen->texture->format() == core::texture_format::RGB &&
+		          g_screen_picture->format() == core::texture_format::RGB,
+		      "screen texture uses opaque RGB pixels");
+		// The window's own renderer makes the textures again.
+		system_event(platform::os_event_type::graphics_device_lost);
 
 		g_end_session_saved = false;
 		system_event(platform::os_event_type::session_ending);
@@ -1999,16 +1719,25 @@ namespace
 		check(key_down(U'A', {}), "keyboard app accepts a C64 matrix key");
 		wait_for_next_frame();
 		check(check_screen_key(1, 2, true), "keyboard app queues a C64 matrix press");
-		sync_held_keys();
+		key_up(U'A', {});
 		wait_for_next_frame();
-		check(check_screen_key(1, 2, false), "platform key state releases a C64 matrix key");
+		check(check_screen_key(1, 2, false), "key release lets go of the C64 matrix key");
 
 		check(key_down(platform::keys::F1, {}), "F1 reaches the C64 key map");
 		wait_for_next_frame();
 		check(check_screen_key(0, 4, true), "F1 presses the C64 F1 matrix key");
-		sync_held_keys();
+		key_up(platform::keys::F1, {});
 		wait_for_next_frame();
-		check(check_screen_key(0, 4, false), "platform key state releases the C64 F1 key");
+		check(check_screen_key(0, 4, false), "key release lets go of the C64 F1 key");
+
+		key_down(U'A', {});
+		{
+			core::scope_locked_inc open(ui::menu_active);
+			idle();
+		}
+		wait_for_next_frame();
+		check(g_held_keys.empty() && check_screen_key(1, 2, false), "an open menu lets go of the C64's keys");
+		key_up(U'A', {});
 
 		g_paused.store(true);
 		check(key_down(platform::keys::PRIOR, {}), "Page Up reaches the app key handler");
@@ -2017,22 +1746,30 @@ namespace
 			g_machine.flush_keys();
 			check(g_machine._state->nmi_pending, "Page Up pulses RESTORE through the app");
 		}
+		key_up(platform::keys::PRIOR, {});
+		check(!g_restore_sent.load(), "Page Up's release readies RESTORE again");
 		g_paused.store(false);
+
+		key_down(platform::keys::F9, {});
+		key_down(platform::keys::F9, {.repeat = true});
+		const bool paused_once = g_paused.load();
+		key_up(platform::keys::F9, {});
+		key_down(platform::keys::F9, {});
+		key_up(platform::keys::F9, {});
+		check(paused_once && !g_paused.load(), "a held F9 pauses once, and its next press resumes");
 
 		set_arrow_mode(arrow_mode::joystick1);
 		check(key_down(platform::keys::UP, {}), "joystick direction reaches the app");
 		wait_for_next_frame();
 		{
 			std::lock_guard lock(g_machine_mutex);
-			check((g_machine._state->joystick1 & kJoyUp) == 0,
-				"joystick mode preserves a short directional tap");
+			check((g_machine._state->joystick1 & kJoyUp) == 0, "joystick mode preserves a short directional tap");
 		}
-		sync_held_keys();
+		key_up(platform::keys::UP, {});
 		wait_for_next_frame();
 		{
 			std::lock_guard lock(g_machine_mutex);
-			check((g_machine._state->joystick1 & kJoyUp) != 0,
-				"joystick release reaches the emulated port");
+			check((g_machine._state->joystick1 & kJoyUp) != 0, "joystick release reaches the emulated port");
 		}
 		set_arrow_mode(arrow_mode::cursor);
 
@@ -2043,46 +1780,50 @@ namespace
 		audio_machine.set_audio_enabled(true);
 		audio_machine.exec(kCyclesPerFrame);
 		check(adapter.can_step(), "audio adapter reports room in the stream");
-		check(adapter.submit(audio_machine) == audio_pacer::submit_result::submitted &&
-			fake->last_block_size() > 0, "audio adapter writes one generated PCM block");
+		check(adapter.submit(audio_machine) == audio_pacer::submit_result::submitted && fake->last_block_size() > 0,
+		      "audio adapter writes one generated PCM block");
 		const int64_t audio_cycle = audio_machine._state->sid.audio_cycle;
-		check(!adapter.can_step() &&
-			adapter.submit(audio_machine) == audio_pacer::submit_result::not_ready &&
-			audio_machine._state->sid.audio_cycle == audio_cycle,
-			"full audio ring does not advance the SID clock");
+		check(!adapter.can_step() && adapter.submit(audio_machine) == audio_pacer::submit_result::not_ready &&
+		          audio_machine._state->sid.audio_cycle == audio_cycle,
+		      "full audio ring does not advance the SID clock");
 		fake->drain_one();
 		check(adapter.can_step(), "audio adapter resumes after a block drains");
 		audio_machine.exec(kCyclesPerFrame);
 		const int64_t rejected_cycle = audio_machine._state->sid.audio_cycle;
 		fake->reject_next_write();
 		check(adapter.submit(audio_machine) == audio_pacer::submit_result::rejected &&
-			audio_machine._state->sid.audio_cycle > rejected_cycle,
-			"audio adapter reports a write refused after can_write");
+		          audio_machine._state->sid.audio_cycle > rejected_cycle,
+		      "audio adapter reports a write refused after can_write");
 
-		if (g_layout.splitter >= 0)
+		if (g_splitter->is_visible())
 		{
+			// Each drag lays the panel out again, so each press finds the splitter where it now is.
+			const auto press = []
+			{
+				return core::pointi{g_splitter->bounds.left + 1, g_splitter->bounds.top + 4};
+			};
 			const int old_panel = g_panel_w;
-			const auto down = core::pointi{g_layout.splitter + 1 + g_screen->bounds.left, g_screen->bounds.top + 4};
-			on_mouse_left_button_down(down, {});
-			auto move = core::pointi{std::max(0, g_layout.splitter - 16) + g_screen->bounds.left, g_screen->bounds.top + 4};
+			on_mouse_left_button_down(press(), {});
+			auto move = core::pointi{std::max(0, g_splitter->bounds.left - 16), g_splitter->bounds.top + 4};
 			on_mouse_move(move, true);
 			on_mouse_left_button_up(move, {});
 			check(g_panel_w != old_panel, "debug splitter resizes through ui mouse input");
 
 			const int captured_panel = g_panel_w;
-			on_mouse_left_button_down(down, {});
-			move.x = std::max(0, g_layout.splitter - 32) + g_screen->bounds.left;
+			on_mouse_left_button_down(press(), {});
+			move.x = std::max(0, g_splitter->bounds.left - 32);
 			on_mouse_move(move, false);
 			check(g_panel_w == captured_panel, "capture loss clears splitter dragging");
 		}
 
 		close_app();
 		check(!g_running.load(), "close request ends the offscreen app loop");
-		platform::write_stdout("lib8bit app headless: " + std::string(failures == 0 ? "PASS" : "FAIL") + "\n");
+		platform::write_stdout("lib64 app headless: " + std::to_string(checks) + " checks, " +
+		                       std::to_string(failures) + " failed\n");
 		return failures == 0 ? 0 : 1;
 	}
 
-	int lib8bit_app::main_loop()
+	int lib64_app::main_loop()
 	{
 		if (!g_headless) start_audio();
 		if (!start_emulation_worker())
@@ -2095,12 +1836,8 @@ namespace
 
 		if (g_headless) return run_headless();
 
-		while (g_running.load() && platform::pump_events())
-		{
-			platform::pump_ui_tasks(0);
-			sync_held_keys();
-			sleep_ms(1);
-		}
+		// Frames arrive from the worker as UI tasks and keys as events, so the loop sleeps until one comes.
+		while (g_running.load() && platform::pump_events()) platform::pump_ui_tasks(50);
 		g_running.store(false);
 		stop_emulation_worker();
 		stop_audio();
@@ -2110,7 +1847,7 @@ namespace
 
 int main(int argc, char* argv[])
 {
-	core::set_app_name("lib8bit");
-	auto app = std::make_shared<lib8bit_app>();
+	core::set_app_name("lib64");
+	auto app = std::make_shared<lib64_app>();
 	return platform::run(app, argc, argv);
 }

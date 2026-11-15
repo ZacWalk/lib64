@@ -30,9 +30,9 @@
     { "name": "linux-release", "configurePreset": "linux-release" }
   ],
   "testPresets": [
-    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
-    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
-    { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
-    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } }
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true, "verbosity": "verbose" } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true, "verbosity": "verbose" } },
+    { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true, "verbosity": "verbose" } },
+    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true, "verbosity": "verbose" } }
   ]
 }

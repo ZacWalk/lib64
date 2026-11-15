@@ -1,6 +1,6 @@
 #pragma once
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // C64 cartridge (.CRT) model: hardware types and bank-switching state.
 
@@ -22,6 +22,7 @@ namespace cart_type
 	constexpr int SUPER_GAMES = 8;
 	constexpr int ATOMIC_POWER = 9;
 	constexpr int EPYX_FASTLOAD = 10;
+	constexpr int WESTERMANN = 11;
 	constexpr int FINAL_CARTRIDGE_I = 13;
 	constexpr int C64_GAME_SYSTEM = 15;
 	constexpr int WARPSPEED = 16;
@@ -31,6 +32,7 @@ namespace cart_type
 	constexpr int COMAL_80 = 21;
 	constexpr int ROSS = 23;
 	constexpr int EASYFLASH = 32;
+	constexpr int RGCD = 57;
 }
 
 // A single ROM/RAM chip bank parsed from a CHIP packet in a .CRT file.
@@ -59,8 +61,15 @@ public:
 	void eject();
 
 	// ROML ($8000-$9FFF) / ROMH ($A000-$BFFF or $E000-$FFFF) fetch. Returns true
-	// and sets out when the cartridge serves the address.
+	// and sets out when the cartridge serves the address. A chip smaller than
+	// its window repeats through it.
 	bool read(uint16_t addr, uint8_t& out) const;
+	// A CPU read of ROML, which on some hardware also switches banks.
+	void touch_roml(uint16_t addr);
+
+	// What the VIC-II fetches at $3000-$3FFF of its bank in Ultimax mode: the
+	// top 4K of ROMH. False outside Ultimax mode, where the VIC sees RAM.
+	bool vic_read(uint16_t vic_address, uint8_t& out) const;
 
 	// I/O window ($DE00-$DFFF) accesses. Some cartridges bank-switch on read.
 	bool read_io(uint16_t addr, uint8_t& out);
@@ -80,11 +89,12 @@ private:
 	int current_bank = 0;
 	int roml_index = -1;
 	int romh_index = -1;
-	bool ultimax_mode = false;
 	std::vector<uint8_t> easyflash_ram;
 	uint8_t easyflash_control = 0;
 
 	bool parse(const uint8_t* bytes, size_t length);
 	void update_bank_mapping();
 	void get_mem_config(int& roml_addr, int& romh_addr) const;
+	// A byte of the ROMH chip mapped now, at an offset into its 8K window.
+	bool romh_byte(int offset, uint8_t& out) const;
 };

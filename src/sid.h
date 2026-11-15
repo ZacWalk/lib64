@@ -3,18 +3,21 @@
 #include <cstdint>
 #include <vector>
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // MOS6581 / MOS8580 SID sound-chip emulation. Three voices (waveform + ADSR
-// envelope) feed a two-integrator
-// analog filter model and an external RC/DC-block stage, resampled with a FIR
-// low-pass into 16-bit PCM.
+// envelope) feed a two-integrator analog filter model and the C64's output
+// stage, clocked once per CPU cycle, then decimated to the host's sample rate
+// by a two-stage anti-aliasing resampler into 16-bit PCM.
 //
-// Note: the kinked-DAC output tables are unused in the audio pipeline (the
-// filter mixes the raw 12-bit waveform * 8-bit envelope), so they are
-// intentionally omitted here.
+// Note: the waveform and envelope DACs are taken as linear; the 6581's
+// kinked-DAC nonlinearity is not modelled.
 
-enum class sid_model { mos6581, mos8580 };
+enum class sid_model
+{
+	mos6581,
+	mos8580
+};
 
 // Builds the shared 4096-entry waveform tables and per-model combined-waveform
 // pulldown tables (AVERAGE config). Idempotent; called by SID construction.
@@ -28,7 +31,11 @@ public:
 	void set_model(bool is_6581) { is6581 = is_6581; }
 	void set_waveform_models(const int16_t (*models)[4096]);
 	void set_pulldown_models(const int16_t (*models)[4096]);
-	void set_other(waveform_generator* prev, waveform_generator* next) { prev_v = prev; next_v = next; }
+	void set_other(waveform_generator* prev, waveform_generator* next)
+	{
+		prev_v = prev;
+		next_v = next;
+	}
 
 	void reset();
 	void clock();
@@ -106,7 +113,12 @@ private:
 	void state_change();
 	void set_exponential_counter();
 
-	enum { ATTACK = 0, DECAY_SUSTAIN = 1, RELEASE = 2 };
+	enum
+	{
+		ATTACK = 0,
+		DECAY_SUSTAIN = 1,
+		RELEASE = 2
+	};
 
 	uint16_t lfsr = 0x7FFF;
 	uint16_t rate = 0;
@@ -135,70 +147,151 @@ public:
 	waveform_generator wave;
 	envelope_generator envelope;
 
-	void reset() { wave.reset(); envelope.reset(); }
-	void write_control(uint8_t v) { wave.write_control(v); envelope.write_control(v); }
+	void reset()
+	{
+		wave.reset();
+		envelope.reset();
+	}
+	void write_control(uint8_t v)
+	{
+		wave.write_control(v);
+		envelope.write_control(v);
+	}
 };
 
-// Two-integrator-loop biquad filter shared shape; 6581/8580 differ only in the
-// cutoff-frequency table (built in the constructor).
+// The mixer and the multi-mode filter. A voice's level is its waveform less the
+// DAC's zero level, times its envelope; the 6581 adds a DC offset per voice and
+// one in the mixer, both scaled by the volume register, which is what makes a
+// $D418 write audible as a "digi". The filter is the chip's two-integrator loop,
+// whose outputs are inverted, with a cutoff curve per model.
 class sid_filter
 {
 public:
 	explicit sid_filter(bool is_6581);
 
 	void set_model(bool is_6581);
+	// The clock the chip runs at, which turns a cutoff in hertz into a step per cycle.
+	void set_clock_frequency(double hz);
 	void reset();
-	void input(int v) { ve = v; }
-	int clock(voice& v1, voice& v2, voice& v3);
+	void input(float v) { ve = v; }
+	// One cycle: the voices mixed, filtered and scaled by the volume register.
+	// 1.0 is a voice at full envelope swinging to one extreme.
+	float clock(voice& v1, voice& v2, voice& v3);
 
-	void write_fc_lo(uint8_t v) { fc = (fc & 0x7F8) | (v & 0x007); update_w0(); }
-	void write_fc_hi(uint8_t v) { fc = ((v << 3) & 0x7F8) | (fc & 0x007); update_w0(); }
+	void write_fc_lo(uint8_t v)
+	{
+		fc = (fc & 0x7F8) | (v & 0x007);
+		update_w0();
+	}
+	void write_fc_hi(uint8_t v)
+	{
+		fc = ((v << 3) & 0x7F8) | (fc & 0x007);
+		update_w0();
+	}
 	void write_res_filt(uint8_t v);
 	void write_mode_vol(uint8_t v);
 	void enable(bool e);
 	// Voices (bit 0 = voice 1) left out of the mix. reset() keeps the mask: it
-	// is the listener's choice, not chip state.
+	// is the listener's choice, not chip state. A muted voice still contributes
+	// its DC, as a silent voice does, so muting it makes no click.
 	void set_mute_mask(uint8_t mask) { mute_mask = mask & 0x07; }
 	uint8_t get_mute_mask() const { return mute_mask; }
 
+	// The cutoff, in hertz, of a model's filter at an 11-bit FC value. The 8580's
+	// is close to linear, from about 30 Hz to 12.5 kHz; the 6581's is an S-curve
+	// from about 230 Hz to 17 kHz, fitted to published measurements of the chip.
+	static double cutoff_hz(bool is_6581, int fc);
+	// The filter's Q at a resonance setting (0-15).
+	static double resonance_q(bool is_6581, int res);
+
 private:
-	int normalized_voice(voice* v) const;
-	void route_voices(voice& v1, voice& v2, voice& v3, int& vi, int& vo);
-	void apply_filter(int vi);
-	int mix_output(int vo);
-	void update_resonance(int res) { resonance_coeff = 1.0 / (0.707 + res * 0.22); }
-	void update_w0() { w0 = freq_table[fc < 2048 ? fc : 2047]; }
-	// Volume-register DC step that produces the 6581 "digi" click; the 8580 has none.
-	void update_digi_dc() { digi_dc = is6581 ? static_cast<int>((vol - 7.5) * 1024) : 0; }
+	float voice_output(voice& v, bool muted) const;
+	void update_w0();
 
 	bool is6581 = true;
-	int vhp = 0, vbp = 0, vlp = 0, ve = 0;
+	double clock_hz = 985248;
+	double vhp = 0, vbp = 0, vlp = 0;
+	float ve = 0;
 	int fc = 0;
+	int res = 0;
 	double w0 = 0;
-	double resonance_coeff = 1.0;
+	double q_inv = 1.0;
 	bool filt1 = false, filt2 = false, filt3 = false, filtE = false;
 	bool voice3off = false, hp = false, bp = false, lp = false;
 	int vol = 0;
-	int digi_dc = 0;
 	bool enabled = true;
 	uint8_t filt = 0;
 	uint8_t mute_mask = 0;
-	const float* freq_table = nullptr;
+	// The waveform DAC's zero level, and the DC each voice and the mixer add, in
+	// units of a voice at full envelope. Set by the model.
+	float wave_zero = 896.0f;
+	float voice_dc = 1.0f;
+	float mixer_dc = 0.0f;
 };
 
-// C64 audio output stage: 16 kHz low-pass + ~1.6 Hz DC blocker.
+// The C64's audio output stage: a 16 kHz RC low-pass and the coupling
+// capacitor's high-pass at about 16 Hz, which removes the 6581's DC.
 class external_filter
 {
 public:
 	void set_clock_frequency(double frequency);
-	void reset() { vlp = 0; vhp = 0; }
-	int clock(int input);
+	void reset()
+	{
+		vlp = 0;
+		vhp = 0;
+	}
+	double clock(double input)
+	{
+		vlp += w_lp * (input - vlp);
+		vhp += w_hp * (vlp - vhp);
+		return vlp - vhp;
+	}
 
 private:
-	int64_t vlp = 0;
-	int64_t vhp = 0;
-	int64_t w0lp_1_s7 = 0;
-	int64_t w0hp_1_s17 = 0;
+	double vlp = 0;
+	double vhp = 0;
+	double w_lp = 0;
+	double w_hp = 0;
+};
+
+// Decimates the chip's one sample per cycle to the output rate without
+// aliasing: a 64-tap FIR takes every eighth cycle, then a polyphase
+// windowed-sinc filter interpolates to the output rate. The pass band is flat
+// to 20 kHz; what would fold back into it is at least 70 dB down.
+class sid_resampler
+{
+public:
+	void configure(double clock_hz, double output_hz);
+	void reset();
+	// One sample per chip cycle; true, with out set, when an output sample is due.
+	bool input(float x, float& out)
+	{
+		a_ring[a_pos] = x;
+		a_ring[a_pos + a_taps] = x;
+		if (++a_pos == a_taps) a_pos = 0;
+		if (++a_count < decimation) return false;
+		a_count = 0;
+		return decimated(out);
+	}
+
+private:
+	static constexpr int decimation = 8;
+	static constexpr int a_taps = 64;
+	static constexpr int b_taps = 128;
+	static constexpr int b_phases = 128;
+
+	bool decimated(float& out);
+
+	float a_coeff[a_taps] = {};
+	float a_ring[2 * a_taps] = {};
+	int a_pos = 0;
+	int a_count = 0;
+
+	std::vector<float> b_table; // (b_phases + 1) rows of b_taps, oldest sample first
+	float b_ring[2 * b_taps] = {};
+	int b_pos = 0;
+	double b_step = 1; // decimated samples per output sample
+	double b_acc = 0;
 };
 
 class sid_chip
@@ -207,7 +300,12 @@ public:
 	sid_chip();
 
 	void set_chip_model(sid_model model);
+	sid_model chip_model() const { return model; }
+	// The chip's clock and the output rate. Rebuilds the resampler only when
+	// either changes.
 	void set_sampling_parameters(double clock_frequency, double sampling_frequency);
+	double clock_rate() const { return clock_frequency; }
+	double sample_rate() const { return sampling_frequency; }
 	void reset();
 
 	uint8_t read(uint16_t offset);
@@ -233,38 +331,32 @@ public:
 	int64_t audio_cycle = 0; // absolute CPU cycle the chip has produced audio up to
 
 private:
-	struct queued_write { uint8_t offset; uint8_t value; int64_t cycle; };
+	struct queued_write
+	{
+		uint8_t offset;
+		uint8_t value;
+		int64_t cycle;
+	};
 
 	void apply_register_write(uint8_t offset, uint8_t value);
 	void age_bus_value(int n);
 	void voice_sync(bool sync);
-	void init_fir_filter(double clock_frequency, double sampling_frequency);
-	bool resampler_input(double sample);
-	int resampler_output();
+	int16_t output_sample(float value) const;
 
 	voice voices[3];
 	sid_filter filter;
 	external_filter ext_filter;
+	sid_resampler resampler;
 
-	sid_model model = sid_model::mos8580;
-	double scale_factor = 0.2;
-	int model_ttl = 0xA2000;
+	sid_model model = sid_model::mos6581;
+	int model_ttl = 0x01D00;
 
 	uint8_t bus_value = 0;
 	int bus_value_ttl = 0;
 	int64_t next_voice_sync = 0x7FFFFFFF;
 
-	double clock_frequency = 985248;
-	double sampling_frequency = 44100;
-	int cycles_per_sample = 0;
-	int sample_offset = 0;
-	double output_value = 0;
-	double dc_offset = 0;
-
-	static constexpr int FIR_LEN = 32;
-	float fir_coeffs[FIR_LEN] = {};
-	float fir_buffer[FIR_LEN] = {};
-	int fir_index = 0;
+	double clock_frequency = 0;
+	double sampling_frequency = 0;
 
 	std::vector<queued_write> write_queue;
 };

@@ -1,4 +1,4 @@
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // Commodore BASIC V2 ROM image (8 KB) as a byte array.
 

@@ -4,7 +4,7 @@
 
 struct machine_state;
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // VIC-II raster renderer interface: frame buffer dimensions and register
 // addresses used by the per-scanline renderer in vic.cpp.
@@ -19,8 +19,8 @@ constexpr int VIC_FB_HEIGHT = 272;
 constexpr int VIC_FIRST_VISIBLE_RASTER = 51 - 36; // 15
 
 // VIC-II register addresses.
-constexpr uint16_t VIC_CTRL1 = 0xD011; // ECM/BMM/DEN/RSEL/YSCROLL + raster bit 8
-constexpr uint16_t VIC_CTRL2 = 0xD016; // MCM/CSEL/XSCROLL
+constexpr uint16_t VIC_CTRL1 = 0xD011;  // ECM/BMM/DEN/RSEL/YSCROLL + raster bit 8
+constexpr uint16_t VIC_CTRL2 = 0xD016;  // MCM/CSEL/XSCROLL
 constexpr uint16_t VIC_MEMORY = 0xD018; // video matrix + char/bitmap base
 
 // C64 colour palette (VICE default), packed 0x00RRGGBB.

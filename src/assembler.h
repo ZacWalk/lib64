@@ -1,6 +1,6 @@
 #pragma once
 
-// lib8bit by Zac Walker
+// lib64 by Zac Walker
 //
 // Public interface for the two-pass 6502 assembler and its result type.
 
@@ -13,10 +13,10 @@
 struct assembler_result
 {
 	bool ok = false;
-	uint16_t origin = 0;         // load address of the first emitted byte
-	std::vector<uint8_t> bytes;  // assembled machine code
-	std::string error;           // human-readable message when !ok
-	int error_line = 0;          // 1-based source line of the error
+	uint16_t origin = 0;        // load address of the first emitted byte
+	std::vector<uint8_t> bytes; // assembled machine code
+	std::string error;          // human-readable message when !ok
+	int error_line = 0;         // 1-based source line of the error
 };
 
 // A small two-pass 6502 assembler built on the opcode table in opcodes.cpp.

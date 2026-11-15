@@ -1,125 +1,98 @@
-# lib8bit Repository Guidance
+# lib64 Repository Guidance
 
-lib8bit is a C++20 Commodore 64 emulator: a platform-independent static library
-(`src/`), a Win32 test app (`app/`), and a command-line test suite (`test/`).
-
-Read [docs/design.md](docs/design.md) before changing anything in `src/` — it
-covers the execution model, the banking page tables, the disk trap and the
-invariants that hold the design together. [docs/todo.md](docs/todo.md) is the
-gap list; prefer picking work from there over inventing new work.
-See [README.md](README.md) for what the emulator covers at a glance.
+lib64 is a C++20 Commodore 64 emulator: a platform-independent static library
+(`src/`), a Windows host app (`app/`) and a command-line test suite (`test/`).
+[README.md](README.md) covers building, running and embedding it, and
+[docs/design.md](docs/design.md) how it works and what it does not emulate.
+Read the design before changing anything in `src/`.
 
 ## Project Boundaries
 
-- `src/` is platform independent. No `windows.h`, no `wchar_t` in new API, no
-  file-system access, no libdesktop types. It must link into Diffractor and other
-  hosts unchanged.
-- The library takes bytes and returns bytes: parsers in `src/` operate on
-  caller-provided buffers. Reading and writing files is the host's job.
+- `src/` keeps the [rules in the design](docs/design.md#rules-that-keep-this-working)
+  and must link into Diffractor and other hosts unchanged.
 - `app/` owns media files, the host-key to C64-matrix mapping, presentation,
-  menus, settings and the audio clock through libdesktop. The `ui::app` frame
-  owns the menu, texture presentation and input host while libdesktop owns the
-  window, message loop, rendering and audio devices; do not restore
-  a private Win32 GUI or include Windows SDK headers in the host.
+  menus, settings and the audio clock, all through libdesktop. It includes no
+  Windows SDK header and has no Win32 GUI of its own.
 - When the app needs a new capability, expose a platform-neutral operation from
   `machine.h` rather than reaching into `machine_state`.
 
 ## Coding Guidelines
 
-- Tab-indented, C++20, existing naming (`snake_case` types and functions).
+- C++20 with the existing naming (`snake_case` types and functions).
+- `.clang-format` is the layout: tabs, Allman braces, 120 columns. Visual
+  Studio installs clang-format in `VC\Tools\Llvm\x64\bin`; `.\dd.ps1 fmt` finds
+  it only on PATH and formats `include`, `src` and `tests`, which here is `src`
+  alone, so run `clang-format -i` on `app/app.cpp` and `test/emulator-tests.cpp`
+  too. `.clang-format-ignore` keeps it off the ROM images, and a table laid out
+  by hand is fenced with `// clang-format off` and `// clang-format on`.
+- Every target builds without warnings at MSVC's `/W4` and GCC's
+  `-Wall -Wextra`, and `.clang-tidy` names the bug-finding and performance
+  checks the code is kept clean against. A deliberate exception is a
+  `// NOLINTNEXTLINE(check): reason` above its line.
 - Keep it compact. This is meant to be a small, fast emulator — add an
   abstraction only when it improves the library API or removes real duplication.
 - `src/rom-*.cpp` are ROM images as byte arrays. Never hand-edit them.
-- Never edit anything under `intermediate/` or `bin/`.
+- Never edit build output under `bin/` or `build/`.
+- Never edit the vendored [dd](https://github.com/ZacWalk/dd) driver, `dd.ps1`
+  and `.dd/`; [docs/dd-upstream.json](docs/dd-upstream.json) records their
+  hashes. Project settings belong in `dd.psd1`. dd documents its
+  [commands](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands) and
+  its [CLI and MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes).
 - The C runtime is the consumer's choice: `CMakeLists.txt` never sets
   `CMAKE_MSVC_RUNTIME_LIBRARY`, so a standalone build gets CMake's default DLL
   runtime and a host such as Diffractor builds the library with its own.
 
-## Build And Validation
+## Validation
 
-Build with the vendored dd driver in PowerShell 7.4+; it sets up the MSVC
-environment itself, so no developer prompt is needed. `build` and `test` cover
-Debug and Release on the host, x64 Windows or x64 Linux:
-
-```powershell
-.\dd.ps1 test --label lib8bit   # build both configs + run the emulator suite
-.\dd.ps1 build release          # or debug
-.\dd.ps1 launch                 # build Release + start the Win32 app
-```
-
-After a build the suite also runs directly:
-
-```powershell
-.\bin\lib8bit_testsd.exe        # Debug; lib8bit_tests.exe is Release. Non-zero on failure
-```
-
-The library and the suite ship wherever Diffractor does, so a change to `src/`,
-`test/`, the build or a public header must also build without warnings and pass
-in both configurations on Linux (GCC, `-Wall -Wextra`) and in Release on 32-bit
-Windows. On Linux or in WSL, from the repository root, with `g++`, `cmake`,
-`ninja-build` and `pwsh` installed:
-
-```bash
-pwsh ./dd.ps1 test --label lib8bit   # presets linux-debug and linux-release
-```
-
-dd drives x64 only, so the x86 check enters the 32-bit MSVC environment itself:
-
-```powershell
-$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-& $env:ComSpec /c "call `"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64_x86 >nul && cmake -S . -B build\x86-windows\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl && cmake --build build\x86-windows\release && ctest --test-dir build\x86-windows\release"
-```
-
-dd's `--json` result counts warnings under `diagnostics`; the x86 check prints
-them inline.
-
-Outputs go to `bin/`: `app8bit64d.exe` and `app8bit64r.exe` for the app,
-`lib8bit_testsd` and `lib8bit_tests` (`.exe` on Windows) for the suite. A 32-bit
-build names them `app8bit32*` and `lib8bit_tests32*`, so it never overwrites the
-64-bit ones. The library and the intermediates stay under
-`build/<platform>/<config>/`.
-
-CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds and tests
-Debug and Release on Windows x64 and on Linux, and Release on Windows x86, on
-every push and PR.
-
-The vendored [dd](https://github.com/ZacWalk/dd) driver is the upstream copy:
-`dd.ps1` plus `.dd/`, checked by the hashes in
-[docs/dd-upstream.json](docs/dd-upstream.json). This repository's settings are
-in `dd.psd1`; dependency pins are in `cmake/dd-dependencies.json`; and
-`.\dd.ps1 commands --json` lists project commands. dd documents its own
-[CLI/MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
-and [command set](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
+- `.\dd.ps1 test --label lib64` builds both configurations and runs the
+  suites. A green build proves nothing on its own: check for `FAIL` lines.
+- The library and the suite ship wherever Diffractor does, so a change to
+  `src/`, `test/`, the build or a public header must also build without
+  warnings and pass in both configurations on Linux (GCC, `-Wall -Wextra`) and
+  in Release on 32-bit Windows. [README.md](README.md#build-and-run) has the
+  commands. dd's `--json` result counts warnings under `diagnostics`; the x86
+  build prints them inline.
+- CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds and
+  tests Debug and Release on Windows x64 and on Linux, and Release on Windows
+  x86, on every push and pull request.
+- Verify `app/` changes with `.\dd.ps1 test --label headless`, which includes
+  the app's offscreen `-test` path and console check counts. Launching the app
+  is an explicit interactive check, never unattended verification.
 
 ## What The Tests Pin
 
 `test/emulator-tests.cpp` is the contract. Before "fixing" an emulation detail,
-check whether a test already encodes the current behaviour — several do
-deliberately:
+check whether a test already encodes the current behaviour:
 
-- CPU: every documented opcode's result, flags and **cycle count**.
-- VIC-II: **exact frame-buffer pixels** for each graphics mode and for sprite
-  collisions. The `$D011` YSCROLL baseline and the sprite-Y offset are pinned to
-  the current convention; changing either requires updating the tests in the
-  same change, deliberately.
-- CIA: timer counting, reload, one-shot, cascade and interrupt latching.
+- CPU: results and flags across loads, binary and decimal arithmetic, logic,
+  shifts, addressing modes, the stack and branches; cycle counts with the
+  page-crossing penalty; the undocumented opcodes' results and flags, and their
+  advancing the PC by their table length.
+- Memory: the I/O registers and colour RAM apart from the RAM beneath them.
+- VIC-II: exact frame-buffer pixels for standard and multicolor text, bitmap
+  mode and sprites; collisions and their interrupts; DEN blanking; the
+  38-column and 24-row borders, the side border over sprites, an invalid mode's
+  black and the character ROM in the VIC's view; the cycles bad lines and
+  sprites take; register read-back and the raster interrupt.
+- CIA: timer counting, reload, one-shot, force-load, cascade and interrupt
+  latching; the time-of-day clock's latch, stop and alarm.
+- SID: aliasing, the filter's resonance and both chips' cutoff ranges, output
+  level, and an NTSC tune's tempo and pitch.
+- Cartridge: a 4K Ultimax ROM's reset vector, and bank switching for EasyFlash,
+  Simons' BASIC, Westermann, Zaxxon and RGCD.
 - Disk: the KERNAL LOAD contract (carry, `X`/`Y` end address, RAM contents),
-  `LOAD"$",8` and the `FILE NOT FOUND` path.
-- Full-machine: KERNAL cold boot to `READY.`, `PRINT 6*7` typed through the
+  relocating loads, `LOAD"$",8`, the `FILE NOT FOUND` path, PETSCII names,
+  `.t64` archives, and starting a disk's file or a `.prg` as a user would.
+- Full machine: KERNAL cold boot to `READY.`, `PRINT 6*7` typed through the
   keyboard matrix, key taps shorter than a frame typed through `queue_key`,
-  RUN/STOP+RESTORE, `example.prg`, `1942.d64`, and the `.crt` fixtures.
+  RUN/STOP+RESTORE, SID audio, the `.sid` player and monitor hooks,
+  `example.prg`, `1942.d64` and the `.crt` fixtures.
 
-A green build proves nothing on its own — run `.\dd.ps1 test --label lib8bit`
-and check for `FAIL` lines. Smoke-test `app/` changes by launching the app; the
-title bar reports media, input mode, pause state and whether audio started.
+Three conventions are pinned as the code has them: the `$D011` YSCROLL
+baseline, the sprite Y offset and the Timer B cascade period, each described in
+[docs/design.md](docs/design.md). Changing one means changing its test in the
+same commit, deliberately.
 
-## Known Gaps
-
-The gap list lives in [docs/todo.md](docs/todo.md), ranked by value per unit of
-work and marked with what is untested. Keep it current: when you close an item,
-delete it; when a review turns one up, add it there rather than in this file.
-
-Note that several tests pin the *current* convention rather than hardware truth
-(the `$D011` YSCROLL baseline, the sprite-Y offset, the Timer B cascade period).
-Those are listed at the end of that document — changing one means changing its
-test in the same commit, deliberately.
+No test covers CIA2's interrupts or the other cartridge types' bank switching.
+Klaus Dormann's 6502 functional test is not part of the suite; run it by hand
+with `--run-bin`.
